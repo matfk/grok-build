@@ -150,8 +150,8 @@ context_window = 200000
 
 - **Cursor CLI required.** Grok spawns the `agent` binary on each inference turn. If it is missing or fails `agent --version`, models are not injected and inference errors.
 - **Ask-mode bridge.** Grok does not call a Cursor HTTP API. Each turn is a subprocess in `--mode ask` with `--workspace` set to your session project directory (ask mode is read-only for Cursor). Grok Shift+Tab modes do not map to Cursor agent/plan.
-- **Tool calls via prompt fence.** Grok tools are not Cursor-native tool calls. The model must emit a fenced `grok-tool-calls` JSON block when it wants Grok to run a tool. This is less reliable than native tool APIs on some models; Grok retries when tool choice is required and the fence is missing.
-- **Grok executes tools.** File edits, shell commands, and search run through Grok's harness. Cursor does not edit your project tree in this mode.
+- **Tool calls via prompt fence.** Grok tools are not Cursor-native tool calls. The model must emit a fenced `grok-tool-calls` JSON block using Grok tool names (`run_terminal_command`, `read_file`, …) — not Cursor `Shell:` / `Read:` UI. Grok remaps common Cursor/Claude aliases when they appear inside a fence, and retries when the reply looks like a tool attempt but cannot be parsed.
+- **Grok executes tools.** File edits, shell commands, and search run through Grok's harness. Cursor does not edit your project tree in this mode. A Cursor IDE Ask session is a different harness: its `Shell` tool is rejected regardless of Cursor billing.
 - **Session resume.** Tool-result follow-ups within a user turn reuse `agent --resume` when the prior turn returned a Cursor session id. Each new user prompt starts a fresh Cursor CLI session.
 - **No backend web search.** Cursor CLI models do not set `supports_backend_search`; use Grok's client-side `web_search` tool if needed.
 - **Subscription and quotas.** Billing and rate limits follow your Cursor plan, not xAI.
