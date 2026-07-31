@@ -12,13 +12,16 @@ pub const TOOL_CALLS_FENCE: &str = "grok-tool-calls";
 
 const TOOL_PROTOCOL: &str = r#"You are the model backend for Grok Build — not Cursor Agent.
 Ignore Cursor ask / agent / plan mode. Those modes do not apply here.
-Grok runs every tool (Read, Write, Edit, Shell, …) on the host. Editing files
+Grok runs every tool on the host via the Available tools list (for example
+`run_terminal_command`, `read_file`, `search_replace`, `write`). Editing files
 is allowed and expected when the user asks. You do not execute tools yourself;
 you request them. Never invent tool results. Never create files under /tmp or a
 Cursor temp workspace.
 
 Do NOT refuse edits with "ask mode", "read-only", or "switch to Agent mode".
-If you need to read or change a file, emit a `grok-tool-calls` fence.
+Do NOT emit Cursor-native tool syntax (`Shell:`, `Read:`, `Write:`, `Edit:`,
+or Cursor function-call UI). Those are ignored and look like rejected shells.
+If you need a tool, emit a `grok-tool-calls` fence using Grok tool names only.
 
 When you need a tool, reply with ONLY this fenced JSON block and nothing else
 (no prose before or after):
@@ -28,7 +31,8 @@ When you need a tool, reply with ONLY this fenced JSON block and nothing else
 ```
 
 Rules:
-- `name` must be exactly one of the Available tools below.
+- `name` must be exactly one of the Available tools below (e.g.
+  `run_terminal_command`, not `Shell` or `Bash`).
 - `arguments` must be a JSON object matching that tool's parameters.
 - Use paths relative to the Grok working directory (or absolute paths inside it).
 - You may include multiple entries in `tool_calls`.
@@ -36,10 +40,10 @@ Rules:
   emit a `grok-tool-calls` fence.
 "#;
 
-const TOOL_EXAMPLE: &str = r#"Example (illustrative names only — use Available tools):
+const TOOL_EXAMPLE: &str = r#"Example (illustrative — prefer exact Available tools names/params):
 
 ```grok-tool-calls
-{"tool_calls":[{"name":"Read","arguments":{"path":"README.md"}}]}
+{"tool_calls":[{"name":"read_file","arguments":{"target_file":"README.md"}}]}
 ```
 "#;
 
@@ -159,7 +163,9 @@ fn build_full_prompt(request: &ConversationRequest, workspace: Option<&std::path
     if !request.tools.is_empty() {
         parts.push(
             "Reminder: you are Grok Build's model, not Cursor Agent. Emit \
-             `grok-tool-calls` to edit/read/run — never refuse for ask mode."
+             `grok-tool-calls` with Available tool names (`run_terminal_command`, \
+             `read_file`, …) — never Cursor `Shell:` / `Read:` and never refuse \
+             for ask mode."
                 .into(),
         );
     }
@@ -188,8 +194,10 @@ fn build_resume_delta(request: &ConversationRequest) -> String {
     let mut parts = results;
     parts.push(
         "Continue. Cursor ask-mode does not block Grok tools. If you need \
-         another tool (including Write/Edit/Shell), emit ONLY a \
-         `grok-tool-calls` fence. Otherwise answer in plain text."
+         another tool (including `write` / `search_replace` / \
+         `run_terminal_command`), emit ONLY a `grok-tool-calls` fence with \
+         Grok tool names — never Cursor `Shell:` / `Read:` syntax. \
+         Otherwise answer in plain text."
             .into(),
     );
     parts.push("Assistant:".into());
@@ -261,9 +269,32 @@ pub fn looks_like_tool_intent(raw: &str) -> bool {
     }
     t.contains(TOOL_CALLS_FENCE)
         || t.contains("\"tool_calls\"")
+        // Truncated fence openers (` ```grok-tool- `) from mid-stream slips.
+        || t.contains("```grok-tool")
         || t.starts_with("```grok-tool-calls")
         || t.starts_with("```json")
         || (t.starts_with('{') && t.contains("tool_calls"))
+        // Cursor-native tool UI mixed into the reply — retry so the model can
+        // emit a real Grok fence instead of finishing with a no-op.
+        || looks_like_cursor_native_tool_ui(t)
+}
+
+fn looks_like_cursor_native_tool_ui(t: &str) -> bool {
+    // Lines like `Shell: …` / `Read: …` that Cursor Agent emits; on the Grok
+    // bridge these never execute.
+    for line in t.lines() {
+        let line = line.trim_start();
+        if let Some((head, _)) = line.split_once(':') {
+            let head = head.trim();
+            if matches!(
+                head,
+                "Shell" | "Bash" | "Read" | "Write" | "Edit" | "Glob" | "Grep" | "TodoWrite"
+            ) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// True when streaming text should be held back from the UI (likely a tool payload).
@@ -277,6 +308,7 @@ pub fn should_suppress_assistant_stream(accumulated: &str) -> bool {
     t.starts_with('{')
         || t.starts_with("```")
         || t.contains(TOOL_CALLS_FENCE)
+        || t.contains("```grok-tool")
         || (t.len() >= 12 && t.contains("\"tool_calls\""))
 }
 
@@ -355,17 +387,90 @@ fn wire_to_tool_calls(calls: Vec<WireToolCall>) -> Vec<ToolCall> {
                 .id
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| format!("cursor_cli_call_{i}"));
-            let arguments = match t.arguments {
+            let (name, arguments) = canonicalize_cursor_bridge_tool(t.name, t.arguments);
+            let arguments = match arguments {
                 serde_json::Value::String(s) => Arc::<str>::from(s),
                 other => Arc::<str>::from(other.to_string()),
             };
             ToolCall {
                 id: Arc::<str>::from(id),
-                name: t.name,
+                name,
                 arguments,
             }
         })
         .collect()
+}
+
+/// Map Cursor/Claude-shaped tool names + args onto Grok's model-facing tools.
+///
+/// Cursor-bridged models often slip into `Shell` / `Read` / `path` even when the
+/// Available tools list uses `run_terminal_command` / `read_file` / `target_file`.
+/// Without this remap, those calls fail as unknown tools and look like shell
+/// rejections under Cursor billing.
+fn canonicalize_cursor_bridge_tool(
+    name: String,
+    mut arguments: serde_json::Value,
+) -> (String, serde_json::Value) {
+    let canonical = match name.as_str() {
+        "Shell" | "shell" | "Bash" | "bash" | "run_terminal_cmd" => "run_terminal_command",
+        "Read" | "read" => "read_file",
+        "Write" | "write_file" => "write",
+        "Edit" | "StrReplace" | "str_replace" | "MultiEdit" => "search_replace",
+        "Glob" | "LS" | "ls" => "list_dir",
+        "Grep" => "grep",
+        "WebSearch" => "web_search",
+        "WebFetch" => "web_fetch",
+        "TodoWrite" => "todo_write",
+        "AskUserQuestion" => "ask_user_question",
+        other => other,
+    };
+
+    // Some models stringify the arguments object; parse so key remaps apply.
+    if let serde_json::Value::String(s) = &arguments
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s)
+    {
+        arguments = parsed;
+    }
+
+    if let serde_json::Value::Object(map) = &mut arguments {
+        match canonical {
+            "read_file" => {
+                rename_json_key(map, "path", "target_file");
+                rename_json_key(map, "file_path", "target_file");
+            }
+            "write" | "search_replace" => {
+                rename_json_key(map, "path", "file_path");
+                rename_json_key(map, "target_file", "file_path");
+                if canonical == "write" {
+                    rename_json_key(map, "contents", "content");
+                }
+            }
+            "list_dir" => {
+                rename_json_key(map, "path", "target_directory");
+                rename_json_key(map, "target_file", "target_directory");
+            }
+            "run_terminal_command" => {
+                rename_json_key(map, "cmd", "command");
+                rename_json_key(map, "full_command", "command");
+            }
+            _ => {}
+        }
+    }
+
+    (canonical.to_owned(), arguments)
+}
+
+fn rename_json_key(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    from: &str,
+    to: &str,
+) {
+    if map.contains_key(to) {
+        return;
+    }
+    if let Some(v) = map.remove(from) {
+        map.insert(to.to_owned(), v);
+    }
 }
 
 fn parse_tool_calls_json(body: &str) -> Option<Vec<ToolCall>> {
@@ -601,25 +706,43 @@ mod tests {
         let raw = r#"I'll look that up.
 
 ```grok-tool-calls
-{"tool_calls":[{"name":"Read","arguments":{"path":"Cargo.toml"}}]}
+{"tool_calls":[{"name":"read_file","arguments":{"target_file":"Cargo.toml"}}]}
 ```
 "#;
         let parsed = parse_assistant_output(raw);
         assert_eq!(parsed.content, "I'll look that up.");
         assert_eq!(parsed.tool_calls.len(), 1);
-        assert_eq!(parsed.tool_calls[0].name, "Read");
+        assert_eq!(parsed.tool_calls[0].name, "read_file");
         assert!(parsed.tool_calls[0].arguments.contains("Cargo.toml"));
     }
 
     #[test]
     fn parses_json_fence_envelope() {
         let raw = r#"```json
-{"tool_calls":[{"name":"Shell","arguments":{"command":"ls"}}]}
+{"tool_calls":[{"name":"run_terminal_command","arguments":{"command":"ls"}}]}
 ```"#;
         let parsed = parse_assistant_output(raw);
         assert!(parsed.content.is_empty());
         assert_eq!(parsed.tool_calls.len(), 1);
-        assert_eq!(parsed.tool_calls[0].name, "Shell");
+        assert_eq!(parsed.tool_calls[0].name, "run_terminal_command");
+    }
+
+    #[test]
+    fn remaps_cursor_shell_and_read_aliases() {
+        let raw = r#"```grok-tool-calls
+{"tool_calls":[
+  {"name":"Shell","arguments":{"command":"git status"}},
+  {"name":"Read","arguments":{"path":"README.md"}}
+]}
+```"#;
+        let parsed = parse_assistant_output(raw);
+        assert_eq!(parsed.tool_calls.len(), 2);
+        assert_eq!(parsed.tool_calls[0].name, "run_terminal_command");
+        assert!(parsed.tool_calls[0].arguments.contains("git status"));
+        assert_eq!(parsed.tool_calls[1].name, "read_file");
+        assert!(parsed.tool_calls[1].arguments.contains("target_file"));
+        assert!(parsed.tool_calls[1].arguments.contains("README.md"));
+        assert!(!parsed.tool_calls[1].arguments.contains("\"path\""));
     }
 
     #[test]
@@ -635,8 +758,8 @@ mod tests {
             ConversationItem::user("hi"),
             ConversationItem::assistant_tool_calls(vec![ToolCall {
                 id: "c1".into(),
-                name: "Read".into(),
-                arguments: r#"{"path":"a"}"#.into(),
+                name: "read_file".into(),
+                arguments: r#"{"target_file":"a"}"#.into(),
             }]),
             ConversationItem::tool_result("c1", "file contents"),
         ]);
@@ -644,6 +767,8 @@ mod tests {
         assert!(prompt.contains("Tool result (call_id=c1)"));
         assert!(!prompt.contains("User: hi"));
         assert!(prompt.contains("Assistant:"));
+        assert!(prompt.contains("run_terminal_command"));
+        assert!(!prompt.contains("Write/Edit/Shell"));
     }
 
     #[test]
@@ -662,9 +787,19 @@ mod tests {
     #[test]
     fn looks_like_tool_intent_detects_raw_json() {
         assert!(looks_like_tool_intent(
-            r#"{"tool_calls":[{"name":"Read","arguments":{}}]}"#
+            r#"{"tool_calls":[{"name":"read_file","arguments":{}}]}"#
         ));
         assert!(!looks_like_tool_intent("hello world"));
+    }
+
+    #[test]
+    fn looks_like_tool_intent_detects_cursor_shell_ui_and_truncated_fence() {
+        assert!(looks_like_tool_intent(
+            "Shell: I'll stage everything and amend with a proper message."
+        ));
+        assert!(looks_like_tool_intent(
+            "Checking status.```grok-tool-Amending the last commit"
+        ));
     }
 
     #[test]
@@ -672,6 +807,12 @@ mod tests {
         assert!(TOOL_PROTOCOL.contains("Ignore Cursor ask"));
         assert!(TOOL_PROTOCOL.contains("Editing files\nis allowed"));
         assert!(TOOL_PROTOCOL.contains("Do NOT refuse edits"));
+        assert!(TOOL_PROTOCOL.contains("run_terminal_command"));
+        assert!(TOOL_PROTOCOL.contains("Do NOT emit Cursor-native tool syntax"));
         assert!(!TOOL_PROTOCOL.contains("ask-mode is\nread-only"));
+        // Must not coach Cursor-native Shell/Read as Grok tool names.
+        assert!(!TOOL_PROTOCOL.contains("(Read, Write, Edit, Shell"));
+        assert!(!TOOL_EXAMPLE.contains("\"name\":\"Read\""));
+        assert!(TOOL_EXAMPLE.contains("read_file"));
     }
 }
