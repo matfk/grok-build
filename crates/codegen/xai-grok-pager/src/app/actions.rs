@@ -649,6 +649,8 @@ pub enum Action {
     SwitchAccount,
     /// User pressed login on the welcome screen.
     Login,
+    /// `/login cursor` — authenticate with the Cursor Agent CLI subscription.
+    LoginCursor,
     /// Cancel an in-progress login that was started from inside a session
     /// (`/login` or a 401 re-auth prompt) and return to the previous view.
     /// Distinct from `Quit`: abandoning a mid-session re-auth must not exit

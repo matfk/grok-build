@@ -264,6 +264,15 @@ fn open_supergrok_upsell(
         Question, QuestionOption,
     };
 
+    // Cursor-billed active route (or explicit override) — don't push SuperGrok
+    // upsells. Clear stuck free_usage_blocked so suppressing the modal cannot
+    // leave the session permanently unable to send prompts.
+    let active_model = agent.session.models.current_model_id_str();
+    if xai_grok_shell::agent::cursor_cli::suppress_supergrok_paywalls(active_model) {
+        agent.session.free_usage_blocked = false;
+        return false;
+    }
+
     // Never displace an already-open question modal. Callers that consume
     // input on open must check this `false` and keep the input instead.
     if agent.question_view.is_some() {

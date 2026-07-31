@@ -54,6 +54,19 @@ Grok uses the API key as a fallback when no session token is active. If you have
 
 ---
 
+## Cursor subscription (Cursor CLI)
+
+To use Cursor subscription models (`cursor/composer-2.5`, `cursor/auto`, and similar) in Grok, authenticate with the Cursor Agent CLI — not `grok login`:
+
+```bash
+agent login
+# or: export CURSOR_API_KEY=...
+```
+
+Grok discovers those models when the `agent` binary is installed. When Cursor CLI models are enabled, Grok also hides SuperGrok access-gate paywalls and free-tier command upsells (same UX as a SuperGrok subscriber for product access). See [Custom Models — Cursor CLI models](11-custom-models.md#cursor-cli-models-cursor-subscription) for enable/disable flags and limitations.
+
+---
+
 ## OIDC (Customer SSO)
 
 Authenticate developers through your own Identity Provider (IdP) -- such as Okta, Azure AD, or Auth0 -- instead of grok.com.
@@ -151,7 +164,7 @@ Use JSON if your tokens expire and you want Grok to automatically re-run the bin
 JSON fields:
 
 | Field | Required | Meaning |
-|-------|----------|---------|
+| ------- | ---------- | --------- |
 | `access_token` | yes | Bearer token Grok sends to the xAI API |
 | `refresh_token` | no | Stored for reference. Grok refreshes by re-running your binary, not with an OAuth refresh grant |
 | `expires_in` | no | Token lifetime in seconds; enables proactive refresh before expiry |
@@ -233,7 +246,7 @@ goes to `~/.grok/leader.log` rather than to you.
 ### Environment Variables
 
 | Variable | Description |
-|----------|-------------|
+| ---------- | ------------- |
 | `GROK_AUTH_PROVIDER_COMMAND` | Path to your auth binary |
 | `GROK_AUTH_PROVIDER_LABEL` | Display name on the TUI login screen (e.g., "Acme Corp") |
 | `GROK_AUTH_TOKEN_TTL` | Token lifetime in seconds (for bare-string tokens without `expires_in`) |
@@ -306,7 +319,7 @@ Coding-data sharing — **Coding data, retention, and training** in Settings,
 which `/privacy` opens — does not change these config knobs:
 
 | Setting | How to set it |
-|---------|---------------|
+| --------- | --------------- |
 | `[features] telemetry` | `config.toml` or `GROK_TELEMETRY_ENABLED` |
 | `[telemetry] trace_upload` | `config.toml` or `GROK_TELEMETRY_TRACE_UPLOAD` |
 | External OpenTelemetry | `GROK_EXTERNAL_OTEL` / `[telemetry] otel_*`. See [Monitoring Usage](24-monitoring-usage.md). |

@@ -1648,6 +1648,8 @@ pub(in crate::app::dispatch) fn set_default_model_inner(
     if app.models.available.contains_key(id) {
         app.models.set_current(id.clone(), None);
     }
+    // Cursor-billed vs xAI free-tier flips paywall/upsell/tier cosmetics.
+    app.apply_tier_restrictions();
     true
 }
 

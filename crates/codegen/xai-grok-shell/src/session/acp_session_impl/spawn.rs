@@ -1584,6 +1584,7 @@ pub(crate) async fn spawn_session_actor(
         compactions_remaining: std::cell::Cell::new(sampling_config.compactions_remaining),
         compaction_at_tokens: std::cell::Cell::new(sampling_config.compaction_at_tokens),
         doom_loop_recovery,
+        cursor_cli_session_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
         doom_loop_turn_tally: Default::default(),
         file_state_tracker,
         rewind_pending_prompt: std::sync::Mutex::new(None),

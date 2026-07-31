@@ -324,6 +324,12 @@ pub struct SamplingClient {
     header_injector: Option<crate::config::SharedHeaderInjector>,
     /// Endpoint URL builder, resolved once from `base_url` + `query_params`.
     endpoint: EndpointTemplate,
+    /// Cursor CLI `--resume` session id for the next ask-mode turn.
+    cursor_cli_resume: Option<String>,
+    /// Shared slot written with the Cursor CLI session id after success.
+    cursor_cli_session_slot: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    /// Project cwd for Cursor CLI `--workspace`.
+    cursor_cli_workspace: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for SamplingClient {
@@ -350,6 +356,7 @@ struct ClientDefaults {
     auth_scheme: AuthScheme,
     stream_tool_calls: bool,
     doom_loop_recovery: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
+    cursor_cli_mode: crate::cursor_cli::CursorCliMode,
 }
 
 /// Endpoint URL builder, resolved once at client construction so each request
@@ -658,6 +665,7 @@ impl SamplingClient {
             auth_scheme: config.auth_scheme,
             stream_tool_calls: config.stream_tool_calls,
             doom_loop_recovery: config.doom_loop_recovery,
+            cursor_cli_mode: config.cursor_cli_mode,
         };
 
         let endpoint = EndpointTemplate::new(&config.base_url, &config.query_params);
@@ -671,12 +679,37 @@ impl SamplingClient {
             bearer_resolver: config.bearer_resolver,
             header_injector: config.header_injector,
             endpoint,
+            cursor_cli_resume: config.cursor_cli_resume,
+            cursor_cli_session_slot: config.cursor_cli_session_slot,
+            cursor_cli_workspace: config.cursor_cli_workspace,
         })
     }
 
     /// The configured API backend for this client.
     pub fn api_backend(&self) -> ApiBackend {
         self.defaults.api_backend.clone()
+    }
+
+    /// The configured model slug for this client.
+    pub fn model(&self) -> &str {
+        &self.defaults.model
+    }
+
+    /// Cursor CLI mode for [`ApiBackend::CursorCli`] turns.
+    ///
+    /// Deprecated for sampling: the backend always uses `--mode ask`. Kept so
+    /// callers that still read this field compile.
+    pub fn cursor_cli_mode(&self) -> crate::cursor_cli::CursorCliMode {
+        self.defaults.cursor_cli_mode
+    }
+
+    /// Options for the next Cursor CLI sampling turn (resume + session slot).
+    pub fn cursor_cli_stream_opts(&self) -> crate::cursor_cli::CursorCliStreamOpts {
+        crate::cursor_cli::CursorCliStreamOpts {
+            resume: self.cursor_cli_resume.clone(),
+            session_slot: self.cursor_cli_session_slot.clone(),
+            workspace: self.cursor_cli_workspace.clone(),
+        }
     }
 
     /// POST with default headers, returning the builder coupled to the tail
@@ -2054,6 +2087,20 @@ impl SamplingClient {
                 let events = crate::stream::stream_messages(raw, meta, request_id, idle_timeout);
                 crate::stream::collect_response(events).await
             }
+            ApiBackend::CursorCli => {
+                let model = self.model().to_owned();
+                let opts = self.cursor_cli_stream_opts();
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let events = crate::cursor_cli::stream_cursor_cli(
+                    request,
+                    model,
+                    request_id,
+                    idle_timeout,
+                    cancel,
+                    opts,
+                );
+                crate::stream::collect_response(events).await
+            }
         };
         result
             .map(|(response, _metrics)| response)
@@ -2151,6 +2198,10 @@ mod tests {
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
+            cursor_cli_mode: Default::default(),
+            cursor_cli_resume: None,
+            cursor_cli_session_slot: None,
+            cursor_cli_workspace: None,
             header_injector: None,
         }
     }

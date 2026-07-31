@@ -55,17 +55,106 @@ default = "grok-4.5"
 
 ## Supported API Backends
 
-Grok supports three API backends. Set `api_backend` in your `[model.*]` config to choose which protocol the model uses:
+Grok supports four API backends. Set `api_backend` in your `[model.*]` config to choose which protocol the model uses:
 
 | Value | API | Default |
-|-------|-----|---------|
+| ------- | ----- | --------- |
 | `"chat_completions"` | OpenAI Chat Completions (`/v1/chat/completions`) | Yes |
 | `"responses"` | OpenAI Responses (`/v1/responses`) | |
 | `"messages"` | Anthropic Messages (`/v1/messages`) | |
+| `"cursor_cli"` | Cursor Agent CLI ask-mode bridge (Cursor subscription; Grok owns tools) | |
 
 When you omit `api_backend`, Grok uses `chat_completions`.
 
 To send provider-specific authentication or version headers -- for example, Anthropic's `x-api-key` -- use the `extra_headers` field described below. Grok sends those headers verbatim with every request to the endpoint.
+
+---
+
+## Cursor CLI models (Cursor subscription)
+
+Grok can use models from your **Cursor** subscription by routing prompts through the [Cursor Agent CLI](https://cursor.com/docs/cli/overview). Grok still runs its own tools (edit, shell, search); Cursor is only the model backend.
+
+Inference always uses `agent --print --mode ask --output-format stream-json`. Ask mode keeps Cursor from running its own tools against your tree — it does **not** make Grok read-only. Grok still edits via its tool loop (`grok-tool-calls`). Shift+Tab session modes (Agent / Plan / Ask) stay Grok-local — they do not change Cursor CLI mode. Within a user turn, follow-up tool rounds resume the same Cursor CLI session via `--resume` when available.
+
+### Prerequisites
+
+1. Install the Cursor CLI:
+
+```bash
+curl https://cursor.com/install -fsS | bash
+```
+
+1. Authenticate with your Cursor account (not `grok login`):
+
+```bash
+agent login
+# or: export CURSOR_API_KEY=...
+```
+
+1. Confirm models are visible:
+
+```bash
+agent --list-models
+```
+
+1. Ensure `agent` is on your `PATH`, or set `CURSOR_AGENT_PATH` or `AGENT_PATH` to the binary.
+
+### Enable and disable
+
+By default, Grok auto-discovers Cursor models when the `agent` binary is available (`agent --version` succeeds). Force on or off:
+
+```toml
+# ~/.grok/config.toml
+[features]
+cursor_cli = true   # or false to disable
+```
+
+```bash
+export GROK_CURSOR_CLI=1   # or 0
+```
+
+Precedence: `GROK_CURSOR_CLI` → `[features].cursor_cli` → auto-detect from the `agent` binary.
+
+### Selecting models
+
+Discovered models appear in `grok models`, the model picker (`Ctrl+M`), and `/model` as `cursor/<id>` with display name `Cursor: …` (for example `cursor/composer-2.5` → `Cursor: Composer 2.5`, `cursor/auto` → `Cursor: Auto`).
+
+```bash
+grok -m cursor/composer-2.5 -p "Explain this repo"
+```
+
+```toml
+[models]
+default = "cursor/auto"
+```
+
+You do **not** need `grok login` or `XAI_API_KEY` for these models. Authentication is entirely via Cursor (`agent login` or `CURSOR_API_KEY`). See [Authentication](02-authentication.md#cursor-subscription-cursor-cli).
+
+### Manual config
+
+You can also declare a Cursor model yourself (or pin a model id that was not auto-discovered):
+
+```toml
+[model.cursor-composer]
+model = "composer-2.5"
+name = "Cursor Composer 2.5"
+api_backend = "cursor_cli"
+base_url = "cursor-cli://local"
+api_key = "cursor-cli"
+context_window = 200000
+```
+
+`base_url` and `api_key` are sentinels so Grok treats the entry as Cursor-authenticated; they are not HTTP endpoints.
+
+### Limitations
+
+- **Cursor CLI required.** Grok spawns the `agent` binary on each inference turn. If it is missing or fails `agent --version`, models are not injected and inference errors.
+- **Ask-mode bridge.** Grok does not call a Cursor HTTP API. Each turn is a subprocess in `--mode ask` with `--workspace` set to your session project directory (ask mode is read-only for Cursor). Grok Shift+Tab modes do not map to Cursor agent/plan.
+- **Tool calls via prompt fence.** Grok tools are not Cursor-native tool calls. The model must emit a fenced `grok-tool-calls` JSON block when it wants Grok to run a tool. This is less reliable than native tool APIs on some models; Grok retries when tool choice is required and the fence is missing.
+- **Grok executes tools.** File edits, shell commands, and search run through Grok's harness. Cursor does not edit your project tree in this mode.
+- **Session resume.** Tool-result follow-ups within a user turn reuse `agent --resume` when the prior turn returned a Cursor session id. Each new user prompt starts a fresh Cursor CLI session.
+- **No backend web search.** Cursor CLI models do not set `supports_backend_search`; use Grok's client-side `web_search` tool if needed.
+- **Subscription and quotas.** Billing and rate limits follow your Cursor plan, not xAI.
 
 ---
 
@@ -81,7 +170,7 @@ name = "Display Name"                     # Shown in the model picker
 description = "Model description"          # Optional description
 api_key = "sk-..."                        # API key for this provider (optional)
 env_key = "XAI_API_KEY"                   # Env var holding the API key (optional; string or array)
-api_backend = "chat_completions"          # "chat_completions", "responses", or "messages"
+api_backend = "chat_completions"          # "chat_completions", "responses", "messages", or "cursor_cli"
 temperature = 0.7                         # Sampling temperature
 top_p = 0.95                              # Nucleus sampling parameter
 max_completion_tokens = 8192              # Maximum tokens per response
@@ -277,7 +366,7 @@ Point Grok at a custom OpenAI-compatible `/v1/models` endpoint instead of the de
 ### Environment Variables
 
 | Variable | Required | Description |
-|----------|----------|-------------|
+| ---------- | ---------- | ------------- |
 | `GROK_MODELS_BASE_URL` | Yes | Base URL for inference. Grok fetches the model list from `{base_url}/models`. |
 | `XAI_API_KEY` | Yes | API key sent as `Authorization: Bearer`. Grok also accepts `GROK_CODE_XAI_API_KEY`. |
 | `GROK_MODELS_LIST_URL` | No | Override the model-list URL when it differs from `{base_url}/models`. |

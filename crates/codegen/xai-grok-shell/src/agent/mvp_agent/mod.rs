@@ -1728,9 +1728,21 @@ impl MvpAgent {
     /// users, reads `allow_access` from remote settings (explicit `false`
     /// blocks; absent field fails open). When settings have not arrived yet
     /// the gate is provisionally open and re-resolved on arrival.
+    ///
+    /// A Cursor-billed active model (or explicit `cursor_cli = true` override)
+    /// also lifts the gate: inference bills to Cursor. Installing the CLI
+    /// alone does not.
     pub(super) async fn enforce_grok_code_access(&self, auth: &crate::auth::GrokAuth) {
         if !auth.is_xai_auth() {
             self.tier_allowed.set(true);
+            return;
+        }
+        if crate::agent::cursor_cli::suppress_supergrok_paywalls_cfg(
+            &self.cfg.borrow(),
+            Some(self.models_manager.current_model_id().0.as_ref()),
+        ) {
+            self.tier_allowed.set(true);
+            *self.allow_access_resolved_for.borrow_mut() = Some(auth.user_id.clone());
             return;
         }
         let settings_for_this_identity = self.cfg.borrow().remote_settings.is_some()
@@ -1811,6 +1823,10 @@ impl MvpAgent {
             }
             if crate::util::config::resolve_remote_fetch_enabled()
                 && !settings_allow_access(self.cfg.borrow().remote_settings.as_ref())
+                && !crate::agent::cursor_cli::suppress_supergrok_paywalls_cfg(
+                    &self.cfg.borrow(),
+                    Some(self.models_manager.current_model_id().0.as_ref()),
+                )
             {
                 tracing::info!(
                     new_tier = %unblocked.new_tier,
@@ -1953,7 +1969,15 @@ impl MvpAgent {
             .auth_manager
             .current()
             .map(|auth| {
-                let gate = if self.tier_allowed.get() { None } else { gate };
+                let cursor_bypass = crate::agent::cursor_cli::suppress_supergrok_paywalls_cfg(
+                    &self.cfg.borrow(),
+                    Some(self.models_manager.current_model_id().0.as_ref()),
+                );
+                let gate = if self.tier_allowed.get() || cursor_bypass {
+                    None
+                } else {
+                    gate
+                };
                 let auth_meta = crate::auth::AuthMeta {
                     email: auth.email.clone(),
                     auth_mode: Some(format!("{:?}", auth.auth_mode)),

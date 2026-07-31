@@ -1040,6 +1040,54 @@ fn switch_model_complete_success_updates_model_and_pushes_message() {
 }
 
 #[test]
+fn switch_model_complete_to_cursor_clears_tier_restricted_usage() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    // Simulate Free-tier deny list already applied.
+    app.subscription_tier = Some("Free".into());
+    app.apply_tier_restrictions();
+    assert!(
+        app.tier_restricted_commands.iter().any(|c| c == "usage"),
+        "precondition: Free tier restricts /usage"
+    );
+
+    let cursor = acp::ModelId::new(std::sync::Arc::from("cursor/auto"));
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.models.available.insert(
+            cursor.clone(),
+            acp::ModelInfo::new(cursor.clone(), "Cursor Auto".to_string()),
+        );
+        agent.session.model_switch_pending = true;
+    }
+
+    dispatch(
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: id,
+            model_id: cursor.clone(),
+            effort: None,
+            result: Ok(()),
+            prev_model_id: None,
+        }),
+        &mut app,
+    );
+
+    assert_eq!(app.agents[&id].session.models.current, Some(cursor));
+    assert!(
+        app.tier_restricted_commands.is_empty(),
+        "Cursor-billed model must lift tier deny list, got {:?}",
+        app.tier_restricted_commands
+    );
+    assert!(
+        !app.agents[&id]
+            .prompt
+            .slash_controller
+            .registry()
+            .is_restricted("usage")
+    );
+}
+
+#[test]
 fn switch_model_complete_skips_message_and_persist_when_unchanged() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);

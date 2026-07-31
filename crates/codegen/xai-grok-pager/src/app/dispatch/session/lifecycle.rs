@@ -1392,7 +1392,13 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
     result: Result<(), SwitchModelError>,
     prev_model_id: Option<acp::ModelId>,
 ) -> Vec<Effect> {
-    if let Some(agent) = app.agents.get_mut(&agent_id) {
+    // Refresh tier slash gates after the model pointer moves (Ok or rollback).
+    // Free + Cursor-billed routes must clear `/usage` from the deny list;
+    // switching back to an xAI free model must put it back.
+    // IncompatibleAgent restores `prev_model_id` then returns early — that
+    // path calls `apply_tier_restrictions` itself before opening the modal.
+    let refresh_tier_gates = result.is_ok();
+    let effects = if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.session.model_switch_pending = false;
         let mut effects = match result {
             Ok(()) => {
@@ -1433,6 +1439,8 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                 }
                 agent.active_modal = None;
                 let display_name = agent.session.models.display_name_for(&model_id);
+                // Agent borrow ends here (NLL) before we re-enter `app`.
+                app.apply_tier_restrictions();
                 return open_agent_type_mismatch_question(app, model_id, effort, &display_name);
             }
             Err(SwitchModelError::Other(msg)) => {
@@ -1447,8 +1455,12 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
         note_peek_page_flip(app, agent_id, drain.page_flip_entry);
         effects
     } else {
-        vec![]
+        return vec![];
+    };
+    if refresh_tier_gates {
+        app.apply_tier_restrictions();
     }
+    effects
 }
 pub(in crate::app::dispatch) fn dispatch_agent_type_mismatch_answered(
     app: &mut AppView,

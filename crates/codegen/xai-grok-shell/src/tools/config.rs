@@ -247,6 +247,10 @@ impl ShellToolsetConfig {
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
+            cursor_cli_mode: Default::default(),
+            cursor_cli_resume: None,
+            cursor_cli_session_slot: None,
+            cursor_cli_workspace: None,
             header_injector: None,
         };
         let mut toolset = base.unwrap_or_else(|| Self {

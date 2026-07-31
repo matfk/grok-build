@@ -821,6 +821,17 @@ impl SessionActor {
                 let events = xai_grok_sampler::stream_messages(raw, meta, request_id, idle_timeout);
                 xai_grok_sampler::collect_response(events).await
             }
+            crate::sampling::ApiBackend::CursorCli => {
+                let events = xai_grok_sampler::cursor_cli::stream_cursor_cli(
+                    request,
+                    sampling_client.model().to_owned(),
+                    request_id,
+                    idle_timeout,
+                    tokio_util::sync::CancellationToken::new(),
+                    sampling_client.cursor_cli_stream_opts(),
+                );
+                xai_grok_sampler::collect_response(events).await
+            }
         };
 
         match result {

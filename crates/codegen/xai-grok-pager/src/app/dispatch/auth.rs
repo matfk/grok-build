@@ -234,7 +234,44 @@ pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
 /// restored once auth completes or is cancelled. Without this, `/login`
 /// with an external auth provider configured appeared to do nothing.
 pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
+    // Bare `/login` (or welcome `l`) while on a Cursor-billed model → Cursor.
+    // Do not key this off the paywall override — that must not steal grok.com login.
+    let on_cursor_model = app
+        .active_model_id_for_paywall()
+        .is_some_and(xai_grok_shell::agent::cursor_cli::is_cursor_billed_model);
+    if on_cursor_model
+        && app.auth_methods.iter().any(|m| {
+            m.id().0.as_ref() == xai_grok_shell::agent::auth_method::CURSOR_CLI_METHOD_ID
+        })
+    {
+        return dispatch_login_cursor(app);
+    }
     ensure_login_method(app);
+    dispatch_login_with_method(app)
+}
+
+/// `/login cursor` — authenticate via the Cursor Agent CLI (`agent login`).
+pub(super) fn dispatch_login_cursor(app: &mut AppView) -> Vec<Effect> {
+    let cursor_method = app.auth_methods.iter().find(|m| {
+        m.id().0.as_ref() == xai_grok_shell::agent::auth_method::CURSOR_CLI_METHOD_ID
+    });
+    let Some(method) = cursor_method else {
+        app.auth_state = AuthState::Pending {
+            error: Some(
+                "Cursor CLI login is unavailable. Install the `agent` binary \
+                 (Cursor Agent CLI), ensure it is on your PATH, then restart grok."
+                    .to_string(),
+            ),
+        };
+        return vec![];
+    };
+    app.login_label = Some(method.name().to_string());
+    app.login_method_id = Some(method.id().clone());
+    app.auth_start_mode = AuthMode::Command;
+    dispatch_login_with_method(app)
+}
+
+fn dispatch_login_with_method(app: &mut AppView) -> Vec<Effect> {
     let Some(method_id) = app.login_method_id.clone() else {
         app.auth_state = AuthState::Pending {
             error: Some(no_login_method_error(app)),

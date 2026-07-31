@@ -1159,6 +1159,10 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
+                cursor_cli_mode: Default::default(),
+                cursor_cli_resume: None,
+                cursor_cli_session_slot: None,
+                cursor_cli_workspace: None,
                 header_injector: None,
             };
             let _ = actor
@@ -1252,6 +1256,10 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
+                cursor_cli_mode: Default::default(),
+                cursor_cli_resume: None,
+                cursor_cli_session_slot: None,
+                cursor_cli_workspace: None,
                 header_injector: None,
             };
             let _ = actor

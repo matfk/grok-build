@@ -679,6 +679,9 @@ pub(crate) struct SessionActor {
     /// `reconstruct_full_config` threads it into the sampler config, and the
     /// sampler itself sends the matching `x-grok-doom-loop-check` header.
     pub(crate) doom_loop_recovery: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
+    /// Cursor CLI `session_id` for `--resume` across Grok tool-result rounds.
+    /// Cleared at the start of each user prompt / model switch.
+    pub(crate) cursor_cli_session_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Telemetry-only per-turn doom-loop recovery tally (attempts, whether a
     /// budget-spent accept happened, tightest trigger label). Accumulated by
     /// the event drainer, taken at turn end for the per-turn analytics event.

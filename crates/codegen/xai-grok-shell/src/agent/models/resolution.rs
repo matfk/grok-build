@@ -201,6 +201,10 @@ pub(crate) fn resolve_model_catalog(
 ) -> IndexMap<String, ModelEntry> {
     let mut catalog: IndexMap<String, ModelEntry> = config::resolve_model_list(cfg, prefetched);
 
+    if crate::agent::cursor_cli::cursor_cli_enabled(cfg) {
+        crate::agent::cursor_cli::merge_cursor_models(&mut catalog);
+    }
+
     if let Ok(Some(disabled)) = ModelGlobSet::compile(cfg.models.disabled_models.as_ref()) {
         let before = catalog.len();
         catalog.retain(|key, entry| !disabled.matches(key, &entry.model));

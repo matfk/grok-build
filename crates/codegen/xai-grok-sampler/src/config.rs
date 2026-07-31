@@ -128,6 +128,26 @@ pub struct SamplerConfig {
     #[serde(default)]
     pub doom_loop_recovery: Option<DoomLoopRecoveryPolicy>,
 
+    /// Legacy Cursor CLI mode field. Sampling always uses `--mode ask`;
+    /// this value is ignored. Kept so `SamplerConfig` literals stay stable.
+    #[serde(default)]
+    pub cursor_cli_mode: crate::cursor_cli::CursorCliMode,
+
+    /// Resume a prior Cursor CLI session (`agent --resume`) on the next
+    /// [`ApiBackend::CursorCli`] turn. Cleared by the shell on each new user
+    /// prompt; set from the previous turn's session id for tool-result rounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_cli_resume: Option<String>,
+
+    /// Shared slot filled with the Cursor CLI `session_id` after a successful
+    /// turn so the shell can populate [`Self::cursor_cli_resume`] next time.
+    #[serde(skip)]
+    pub cursor_cli_session_slot: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+
+    /// Project cwd passed to Cursor CLI `--workspace` (ask-mode is read-only).
+    #[serde(skip)]
+    pub cursor_cli_workspace: Option<std::path::PathBuf>,
+
     /// Per-request header injector (e.g. OTel traceparent). Called in `post()`.
     #[serde(skip)]
     pub header_injector: Option<SharedHeaderInjector>,
@@ -166,6 +186,10 @@ impl Default for SamplerConfig {
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
+            cursor_cli_mode: crate::cursor_cli::CursorCliMode::default(),
+            cursor_cli_resume: None,
+            cursor_cli_session_slot: None,
+            cursor_cli_workspace: None,
             header_injector: None,
         }
     }

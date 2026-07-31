@@ -1236,8 +1236,25 @@ impl AppView {
         self.is_zdr && !self.zdr_access_enabled
     }
     /// User is not gated (no gate from remote settings or subscription fallback).
+    ///
+    /// A Cursor-billed active model (or an explicit `cursor_cli = true` override)
+    /// also counts as access: inference bills to Cursor, so SuperGrok paywalls
+    /// must not block the UI. Installing the CLI alone does not.
     pub fn has_access(&self) -> bool {
         self.gate.is_none()
+            || xai_grok_shell::agent::cursor_cli::suppress_supergrok_paywalls(
+                self.active_model_id_for_paywall(),
+            )
+    }
+
+    /// Model id used for Cursor paywall policy (session model, else app default).
+    pub(crate) fn active_model_id_for_paywall(&self) -> Option<&str> {
+        if let Some(agent) = self.active_agent() {
+            if let Some(id) = agent.session.models.current_model_id_str() {
+                return Some(id);
+            }
+        }
+        self.models.current_model_id_str()
     }
     /// True when the user should not see the prompt (gate, subscription, or ZDR).
     pub fn is_access_blocked(&self) -> bool {
@@ -1698,7 +1715,19 @@ impl AppView {
     /// `x.ai/settings/update` handler when the subscription tier changes, so
     /// a mid-session upgrade lifts the restrictions without a restart.
     pub fn apply_tier_restrictions(&mut self) {
-        let restricted = self.team_name.is_none()
+        crate::views::announcements::set_paywall_active_model(self.active_model_id_for_paywall());
+        let cursor_bypass = xai_grok_shell::agent::cursor_cli::suppress_supergrok_paywalls(
+            self.active_model_id_for_paywall(),
+        );
+        // Suppressing SuperGrok upsells must not leave free_usage_blocked stuck
+        // (otherwise prompts stay dead with no modal to clear the flag).
+        if cursor_bypass {
+            for agent in self.agents.values_mut() {
+                agent.session.free_usage_blocked = false;
+            }
+        }
+        let restricted = !cursor_bypass
+            && self.team_name.is_none()
             && !self.is_api_key_auth
             && !self.has_external_auth_provider
             && is_restricted_tier(self.subscription_tier.as_deref());
@@ -4518,7 +4547,14 @@ impl AppView {
                                     &self.hidden_announcement_ids,
                                 )
                             })
-                            .or(self.announcement.as_ref());
+                            .or_else(|| {
+                                // Random tip pick may still be a SuperGrok upgrade
+                                // promo; hide it when Cursor can bill inference.
+                                self.announcement.as_ref().filter(|a| {
+                                    !crate::views::announcements::upgrade_upsells_suppressed()
+                                        || a.severity.as_deref() != Some("promo")
+                                })
+                            });
                         let welcome_params = crate::views::welcome::WelcomeRenderParams {
                             prompt_focus: if self.welcome_prompt_focused {
                                 WelcomePromptFocus::Focused

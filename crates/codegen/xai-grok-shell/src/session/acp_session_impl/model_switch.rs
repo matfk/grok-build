@@ -11,6 +11,9 @@ impl SessionActor {
         auto_compact_threshold_percent: u8,
     ) -> Result<acp::ModelId, acp::Error> {
         let model_id = acp::ModelId::new(sampling_config.model.clone());
+        if let Ok(mut slot) = self.cursor_cli_session_id.lock() {
+            *slot = None;
+        }
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
             std::num::NonZeroU64::new(sampling_config.context_window).unwrap_or_else(|| {
                 std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)

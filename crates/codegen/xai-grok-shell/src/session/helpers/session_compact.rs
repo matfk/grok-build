@@ -811,6 +811,13 @@ pub(crate) async fn generate_session_compact(
                 itl_max_ms: timing.itl_max_ms(),
             }
         }
+        ApiBackend::CursorCli => {
+            // Cursor CLI ask-mode has no compaction-shaped tool-call surface.
+            return Err(CompactFailure::Deterministic(
+                acp::Error::internal_error()
+                    .data("compact failed: compaction is unsupported on the cursor_cli backend"),
+            ));
+        }
     };
     if output.content.is_empty() {
         Err(CompactFailure::Transient(
@@ -1741,6 +1748,10 @@ mod reasoning_compaction_regression_tests {
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
+            cursor_cli_mode: Default::default(),
+            cursor_cli_resume: None,
+            cursor_cli_session_slot: None,
+            cursor_cli_workspace: None,
             header_injector: None,
         }
     }

@@ -180,6 +180,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 compactions_remaining: std::cell::Cell::new(None),
                 compaction_at_tokens: std::cell::Cell::new(None),
                 doom_loop_recovery: None,
+                cursor_cli_session_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
                 doom_loop_turn_tally: Default::default(),
                 file_state_tracker: Arc::new(FileStateTracker::new()),
                 rewind_pending_prompt: std::sync::Mutex::new(None),

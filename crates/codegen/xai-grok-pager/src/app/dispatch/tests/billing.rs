@@ -1175,6 +1175,44 @@ fn restricted_command_alias_also_upsells() {
     assert!(app.agents[&id].question_view.is_some(), "upsell must open");
 }
 
+/// Stale Free-tier deny list + Cursor-billed model must not silent-no-op:
+/// upsell is suppressed, so `/usage` must execute (FetchSessionUsage).
+#[test]
+fn restricted_usage_on_cursor_model_executes_instead_of_silent_noop() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let cursor = acp::ModelId::new(std::sync::Arc::from("cursor/auto"));
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.models.available.insert(
+            cursor.clone(),
+            acp::ModelInfo::new(cursor.clone(), "Cursor Auto".to_string()),
+        );
+        agent.session.models.set_current(cursor, None);
+        agent.session.session_id = Some(acp::SessionId::new(std::sync::Arc::from("s1")));
+        agent.set_restricted_commands(&["usage".to_string()]);
+    }
+
+    let effects = dispatch(Action::SendPrompt("/usage".into()), &mut app);
+
+    assert!(
+        app.agents[&id].question_view.is_none(),
+        "Cursor route must not open SuperGrok upsell"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::FetchSessionUsage { .. })),
+        "expected FetchSessionUsage, got {effects:?}"
+    );
+    assert!(
+        !app.agents[&id]
+            .prompt
+            .slash_controller
+            .registry()
+            .is_restricted("usage"),
+        "stale deny list must be cleared so dispatch can run"
+    );
+}
+
 /// A restricted submit while ANOTHER question modal is already open
 /// must not silently drop the typed text — the upsell can't open (the guard
 /// never displaces a modal), so the composer keeps the text for a resubmit

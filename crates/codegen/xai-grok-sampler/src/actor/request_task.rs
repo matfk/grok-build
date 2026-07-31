@@ -548,6 +548,30 @@ async fn run_one_attempt(
             )
             .await
         }
+        ApiBackend::CursorCli => {
+            let model = client.model().to_owned();
+            let opts = client.cursor_cli_stream_opts();
+            let l2 = crate::cursor_cli::stream_cursor_cli(
+                request,
+                model,
+                request_id.clone(),
+                idle_timeout,
+                cancel_token.clone(),
+                opts,
+            );
+            // No HTTP error tee for the CLI backend.
+            let captured: ErrorCell = Arc::new(Mutex::new(None));
+            drive_l2(
+                l2,
+                request_id,
+                event_tx,
+                cancel_token,
+                captured,
+                None,
+                output_observed,
+            )
+            .await
+        }
     }
 }
 

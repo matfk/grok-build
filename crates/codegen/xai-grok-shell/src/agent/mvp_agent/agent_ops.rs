@@ -1528,12 +1528,12 @@ impl MvpAgent {
             .filter(|a| a.is_xai_auth())
             .map(|a| a.user_id)
         {
-            self.tier_allowed
-                .set(
-                    super::settings_allow_access(
-                        self.cfg.borrow().remote_settings.as_ref(),
-                    ),
+            let allow = super::settings_allow_access(self.cfg.borrow().remote_settings.as_ref())
+                || crate::agent::cursor_cli::suppress_supergrok_paywalls_cfg(
+                    &self.cfg.borrow(),
+                    Some(self.models_manager.current_model_id().0.as_ref()),
                 );
+            self.tier_allowed.set(allow);
             *self.allow_access_resolved_for.borrow_mut() = Some(identity);
         }
         self.reapply_storage_mode();
@@ -2243,6 +2243,12 @@ impl MvpAgent {
     /// ([`crate::tier::is_restricted_tier_name`]); the only difference is the
     /// absent-tier policy (the pager hides on `None`, we fail open on `None`).
     fn is_tier_restricted_capability(&self) -> bool {
+        if crate::agent::cursor_cli::suppress_supergrok_paywalls_cfg(
+            &self.cfg.borrow(),
+            Some(self.models_manager.current_model_id().0.as_ref()),
+        ) {
+            return false;
+        }
         let Some(auth) = self.auth_manager.current() else {
             return false;
         };
@@ -2256,7 +2262,8 @@ impl MvpAgent {
             .as_ref()
             .and_then(|rs| rs.subscription_tier_display.clone())
             .or_else(|| jwt_tier_claim(&auth.key));
-        tier.as_deref().is_some_and(crate::tier::is_restricted_tier_name)
+        tier.as_deref()
+            .is_some_and(crate::tier::is_restricted_tier_name)
     }
     /// Build image generation config.
     ///

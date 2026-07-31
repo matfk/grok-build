@@ -4789,6 +4789,13 @@ pub struct Features {
     /// `None` = defer to env / default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_recursive_config_watch: Option<bool>,
+    /// Discover Cursor Agent CLI models and route them through the Cursor
+    /// subscription backend so Grok can sample with `cursor/<id>` catalog keys.
+    /// Grok keeps client-side tools while billing to your Cursor subscription.
+    /// Auth is Cursor-side (`agent login` / `CURSOR_API_KEY`).
+    /// `None` = auto (enable when the `agent` binary is available).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_cli: Option<bool>,
 }
 /// Resolved credentials for a model session.
 pub(crate) struct ResolvedCredentials {
@@ -5215,6 +5222,10 @@ pub(crate) fn sampling_config_for_model(
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
+        cursor_cli_mode: xai_grok_sampler::CursorCliMode::default(),
+        cursor_cli_resume: None,
+        cursor_cli_session_slot: None,
+        cursor_cli_workspace: None,
         header_injector: None,
     }
 }

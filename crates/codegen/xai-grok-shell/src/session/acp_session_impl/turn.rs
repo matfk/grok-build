@@ -262,6 +262,11 @@ impl SessionActor {
             .sum();
         tracing::Span::current().record("prompt_length", prompt_length as i64);
         *self.active_skill.lock() = None;
+        // Fresh Cursor CLI session per user prompt; tool rounds within the
+        // turn resume via cursor_cli_session_id.
+        if let Ok(mut slot) = self.cursor_cli_session_id.lock() {
+            *slot = None;
+        }
         xai_grok_telemetry::unified_log::info(
             "shell.handle_prompt.start",
             Some(self.session_info.id.0.as_ref()),

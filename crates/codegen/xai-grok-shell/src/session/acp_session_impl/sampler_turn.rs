@@ -516,6 +516,15 @@ impl SessionActor {
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
+            // Cursor models always sample in ask mode; Grok owns tools.
+            cursor_cli_mode: xai_grok_sampler::CursorCliMode::Ask,
+            cursor_cli_resume: self
+                .cursor_cli_session_id
+                .lock()
+                .ok()
+                .and_then(|g| g.clone()),
+            cursor_cli_session_slot: Some(std::sync::Arc::clone(&self.cursor_cli_session_id)),
+            cursor_cli_workspace: Some(std::path::PathBuf::from(self.session_info.cwd.as_str())),
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
         }
     }
