@@ -18,10 +18,23 @@ pub(crate) fn detect_external_auth_provider(auth_methods: &[acp::AuthMethod]) ->
 }
 
 fn auth_method_is_external_provider(method: &acp::AuthMethod) -> bool {
-    method
-        .meta()
-        .as_ref()
-        .and_then(|v| v.get("external_provider"))
+    // Cursor CLI is additive and may historically have carried
+    // `external_provider`; never treat it as enterprise auth that hides `/usage`.
+    if method.id().0.as_ref() == xai_grok_shell::agent::auth_method::CURSOR_CLI_METHOD_ID {
+        return false;
+    }
+    let meta = method.meta();
+    let Some(meta) = meta.as_ref() else {
+        return false;
+    };
+    if meta
+        .get("cursor_cli")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    meta.get("external_provider")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
 }
@@ -113,5 +126,39 @@ impl SlashCommand for UsageCommand {
                 "Unknown argument: {arg}. Use /usage show or /usage manage"
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_cli_method_does_not_hide_usage() {
+        let cursor = xai_grok_shell::agent::auth_method::cursor_cli_auth_method();
+        assert!(
+            !detect_external_auth_provider(&[cursor]),
+            "advertising cursor.cli must not hide /usage",
+        );
+    }
+
+    #[test]
+    fn cursor_cli_ignored_even_if_external_provider_flag_set() {
+        let mut meta = acp::Meta::new();
+        meta.insert("external_provider".to_owned(), serde_json::json!(true));
+        meta.insert("cursor_cli".to_owned(), serde_json::json!(true));
+        let cursor = acp::AuthMethod::Agent(
+            acp::AuthMethodAgent::new(
+                acp::AuthMethodId::new(
+                    xai_grok_shell::agent::auth_method::CURSOR_CLI_METHOD_ID,
+                ),
+                "Cursor".to_string(),
+            )
+            .meta(Some(meta)),
+        );
+        assert!(
+            !auth_method_is_external_provider(&cursor),
+            "legacy cursor.cli + external_provider must still leave /usage visible",
+        );
     }
 }
