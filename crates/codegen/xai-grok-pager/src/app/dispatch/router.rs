@@ -162,6 +162,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             effects.push(Effect::Quit);
             effects
         }
+        Action::DismissPendingUpdate => {
+            app.pending_update_version = None;
+            vec![]
+        }
         Action::ResumeForeignSession => {
             let Some(hint) = app.take_foreign_resume_hint() else {
                 return vec![];

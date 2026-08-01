@@ -40,6 +40,11 @@ pub enum Action {
     Quit,
     /// Restart the binary to pick up a downloaded update.
     QuitForUpdate,
+    /// Dismiss the welcome-screen upstream-update tip without installing.
+    ///
+    /// Used by this Cursor subscription fork: official `grok update` would
+    /// replace the fork binary. The tip stays informational; Ctrl+U clears it.
+    DismissPendingUpdate,
     /// Resume the recent foreign session offered on the launch welcome screen.
     ResumeForeignSession,
     /// Re-exec into the other screen mode (`true` = minimal).
