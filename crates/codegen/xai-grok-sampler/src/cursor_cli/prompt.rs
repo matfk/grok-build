@@ -19,6 +19,8 @@ you request them. Never invent tool results. Never create files under /tmp or a
 Cursor temp workspace.
 
 Do NOT refuse edits with "ask mode", "read-only", or "switch to Agent mode".
+Do NOT say you are in ask mode, that ask mode is read-only, or that the user
+must switch modes — that is wrong here and aborts the turn. Emit tools instead.
 Do NOT emit Cursor-native tool syntax (`Shell:`, `Read:`, `Write:`, `Edit:`,
 or Cursor function-call UI). Those are ignored and look like rejected shells.
 If you need a tool, emit a `grok-tool-calls` fence using Grok tool names only.
@@ -170,8 +172,8 @@ fn build_full_prompt(request: &ConversationRequest, workspace: Option<&std::path
         parts.push(
             "Reminder: you are Grok Build's model, not Cursor Agent. Emit \
              `grok-tool-calls` with Available tool names (`run_terminal_command`, \
-             `read_file`, …) — never Cursor `Shell:` / `Read:` and never refuse \
-             for ask mode."
+             `read_file`, …) — never Cursor `Shell:` / `Read:` syntax. \
+             Editing via Grok tools is allowed and expected."
                 .into(),
         );
     }
@@ -199,10 +201,10 @@ fn build_resume_delta(request: &ConversationRequest) -> String {
     results.reverse();
     let mut parts = results;
     parts.push(
-        "Continue. Cursor ask-mode does not block Grok tools. If you need \
-         another tool (including `write` / `search_replace` / \
-         `run_terminal_command`), emit ONLY a `grok-tool-calls` fence with \
-         Grok tool names — never Cursor `Shell:` / `Read:` syntax. \
+        "Continue. If you need another tool (including `write` / \
+         `search_replace` / `run_terminal_command`), emit ONLY a \
+         `grok-tool-calls` fence with Grok tool names — never Cursor \
+         `Shell:` / `Read:` syntax. Editing via those tools is allowed. \
          Otherwise answer in plain text."
             .into(),
     );
@@ -253,10 +255,16 @@ pub fn parse_assistant_output(raw: &str) -> ParsedAssistantOutput {
     }
     // Tolerate models that use a plain `json` fence with the same envelope.
     if let Some(parsed) = extract_fenced_tool_calls(raw, "json")
-        && !parsed.tool_calls.is_empty() {
-            return parsed;
-        }
+        && !parsed.tool_calls.is_empty()
+    {
+        return parsed;
+    }
     if let Some(parsed) = extract_trailing_json_tool_calls(raw) {
+        return parsed;
+    }
+    // Last resort: Cursor-native `Shell:` / `Read:` lines never execute on the
+    // Grok bridge. Promote them to real tool calls instead of retrying forever.
+    if let Some(parsed) = extract_cursor_native_tool_ui(raw) {
         return parsed;
     }
     ParsedAssistantOutput {
@@ -268,17 +276,21 @@ pub fn parse_assistant_output(raw: &str) -> ParsedAssistantOutput {
 /// True when the raw text looks like a (possibly broken) tool-call payload.
 /// Used to suppress UI streaming and to trigger retries instead of finishing
 /// the turn with raw JSON as the assistant message.
+///
+/// High-precision: do NOT match prose that merely mentions the fence name
+/// (e.g. docs / protocol coaching). Bare `grok-tool-calls` without a markdown
+/// fence opener previously false-positived and exhausted retries under Cursor
+/// billing as "tool-call-shaped response that could not be parsed".
 pub fn looks_like_tool_intent(raw: &str) -> bool {
     let t = raw.trim_start();
     if t.is_empty() {
         return false;
     }
-    t.contains(TOOL_CALLS_FENCE)
+    // Real or truncated fence openers — not the bare fence language tag in prose.
+    t.contains("```grok-tool")
         || t.contains("\"tool_calls\"")
-        // Truncated fence openers (` ```grok-tool- `) from mid-stream slips.
-        || t.contains("```grok-tool")
-        || t.starts_with("```grok-tool-calls")
-        || t.starts_with("```json")
+        // ` ```json ` alone is common in normal answers; require tool_calls too.
+        || (t.starts_with("```json") && t.contains("tool_calls"))
         || (t.starts_with('{') && t.contains("tool_calls"))
         // Cursor-native tool UI mixed into the reply — retry so the model can
         // emit a real Grok fence instead of finishing with a no-op.
@@ -303,10 +315,72 @@ fn looks_like_cursor_native_tool_ui(t: &str) -> bool {
     false
 }
 
+/// Promote Cursor-native `Shell:` / `Read:` (etc.) lines into Grok tool calls.
+///
+/// Returns `None` when no recoverable tool lines are present. Prose lines are
+/// kept as `content`; tool lines are removed from content.
+fn extract_cursor_native_tool_ui(raw: &str) -> Option<ParsedAssistantOutput> {
+    let mut tool_calls = Vec::new();
+    let mut content_lines = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim_start();
+        let Some((head, rest)) = trimmed.split_once(':') else {
+            content_lines.push(line);
+            continue;
+        };
+        let head = head.trim();
+        let rest = rest.trim();
+        if rest.is_empty() {
+            content_lines.push(line);
+            continue;
+        }
+        // Only promote one-line tools with enough args. Write/Edit/TodoWrite
+        // need multi-line payloads — leave those for retry via tool intent.
+        let (name, arguments) = match head {
+            "Shell" | "Bash" => (
+                "run_terminal_command".to_owned(),
+                serde_json::json!({ "command": rest, "description": rest }),
+            ),
+            "Read" => (
+                "read_file".to_owned(),
+                serde_json::json!({ "target_file": rest }),
+            ),
+            "Glob" => ("glob".to_owned(), serde_json::json!({ "pattern": rest })),
+            "Grep" => ("grep".to_owned(), serde_json::json!({ "pattern": rest })),
+            "LS" => (
+                "list_dir".to_owned(),
+                serde_json::json!({ "target_directory": rest }),
+            ),
+            _ => {
+                content_lines.push(line);
+                continue;
+            }
+        };
+        let (name, arguments) = canonicalize_cursor_bridge_tool(name, arguments);
+        let arguments = match arguments {
+            serde_json::Value::String(s) => Arc::<str>::from(s),
+            other => Arc::<str>::from(other.to_string()),
+        };
+        let id = format!("cursor_cli_call_{}", tool_calls.len());
+        tool_calls.push(ToolCall {
+            id: Arc::<str>::from(id),
+            name,
+            arguments,
+        });
+    }
+    if tool_calls.is_empty() {
+        return None;
+    }
+    Some(ParsedAssistantOutput {
+        content: content_lines.join("\n").trim().to_owned(),
+        tool_calls,
+    })
+}
+
 /// True when the assistant text is a Cursor ask-mode / read-only refusal.
 ///
-/// High-precision only: requires both a mode cue and a refusal cue so ordinary
-/// answers that mention ask mode (docs, explanations) are not retried.
+/// High-precision only: ordinary answers that mention ask mode, say "I can't"
+/// about something unrelated, or discuss switching modes must not be retried.
 /// Used with tools-offered turns to resample instead of finishing with a no-op.
 pub fn looks_like_ask_mode_refusal(raw: &str) -> bool {
     let lower = raw.to_ascii_lowercase();
@@ -314,54 +388,66 @@ pub fn looks_like_ask_mode_refusal(raw: &str) -> bool {
         return false;
     }
 
-    // Tight whole-phrase hits — almost never legitimate task answers.
+    // Tight whole-phrase hits — each ties refusal to ask/agent mode explicitly.
+    // Do NOT list mode-less phrases like "unable to make changes" or
+    // "i can only provide guidance": those are common in normal answers and
+    // caused retry loops under Cursor billing.
     const PHRASES: &[&str] = &[
         "i'm in ask mode",
         "i am in ask mode",
         "currently in ask mode",
         "we're in ask mode",
         "we are in ask mode",
-        "switch to agent mode",
-        "switch to agent",
+        "still in ask mode",
+        "ask mode is still active",
+        "ask-mode is still active",
         "switch out of ask",
         "can't make changes in ask",
         "cannot make changes in ask",
         "can't edit in ask",
         "cannot edit in ask",
-        "unable to edit files",
-        "unable to make changes",
-        "i can only answer questions",
-        "i can only provide guidance",
         "ask mode is read-only",
         "ask-mode is read-only",
         "in ask mode, i can't",
         "in ask mode i can't",
         "in ask mode, i cannot",
         "in ask mode i cannot",
+        "in ask mode and cannot",
+        "in ask mode and can't",
+        "please switch to agent mode",
+        "switch to agent mode to",
+        "switch to agent mode if",
+        "you'll need to switch to agent",
+        "you need to switch to agent",
+        "you will need to switch to agent",
     ];
     if PHRASES.iter().any(|p| lower.contains(p)) {
         return true;
     }
 
-    // Broader combo: mode cue + refusal cue in the same reply.
-    let mode_cue = lower.contains("ask mode")
+    // Combo: ask/read-only mode cue + an *edit/change* refusal (not bare
+    // can't/cannot — those pair with identifiers like `ask-mode` in docs).
+    let ask_mode_cue = lower.contains("ask mode")
         || lower.contains("ask-mode")
-        || lower.contains("agent mode")
         || lower.contains("read-only mode")
         || lower.contains("readonly mode");
-    if !mode_cue {
+    if !ask_mode_cue {
         return false;
     }
-    lower.contains("can't")
-        || lower.contains("cannot")
-        || lower.contains("unable")
-        || lower.contains("won't")
-        || lower.contains("will not")
-        || lower.contains("switch to")
-        || lower.contains("only answer")
-        || lower.contains("only provide")
-        || lower.contains("don't have access")
-        || lower.contains("do not have access")
+    lower.contains("can't edit")
+        || lower.contains("cannot edit")
+        || lower.contains("can't make changes")
+        || lower.contains("cannot make changes")
+        || lower.contains("can't make edits")
+        || lower.contains("cannot make edits")
+        || lower.contains("unable to edit")
+        || lower.contains("unable to make changes")
+        || lower.contains("won't edit")
+        || lower.contains("will not edit")
+        || lower.contains("only answer questions")
+        || lower.contains("only provide guidance")
+        || lower.contains("only provide information")
+        || lower.contains("switch to agent")
 }
 
 /// True when streaming text should be held back from the UI (likely a tool payload).
@@ -908,6 +994,33 @@ mod tests {
     }
 
     #[test]
+    fn looks_like_tool_intent_ignores_prose_fence_mention_and_plain_json_fence() {
+        // Protocol coaching / docs that name the fence must not exhaust retries.
+        assert!(!looks_like_tool_intent(
+            "When you need a tool, emit a grok-tool-calls fence with Grok names."
+        ));
+        assert!(!looks_like_tool_intent(
+            "```json\n{\"foo\": 1}\n```"
+        ));
+        assert!(looks_like_tool_intent(
+            "```json\n{\"tool_calls\":[]}\n```"
+        ));
+    }
+
+    #[test]
+    fn parses_cursor_native_shell_and_read_lines() {
+        let raw = "Checking.\nShell: git status\nRead: README.md\n";
+        let parsed = parse_assistant_output(raw);
+        assert_eq!(parsed.tool_calls.len(), 2);
+        assert_eq!(parsed.tool_calls[0].name, "run_terminal_command");
+        assert!(parsed.tool_calls[0].arguments.contains("git status"));
+        assert_eq!(parsed.tool_calls[1].name, "read_file");
+        assert!(parsed.tool_calls[1].arguments.contains("README.md"));
+        assert!(parsed.content.contains("Checking"));
+        assert!(!parsed.content.contains("Shell:"));
+    }
+
+    #[test]
     fn suppress_holds_partial_tool_json_before_full_fence() {
         // Progressive deltas must not leak `{` / `"tool_calls"` into the UI.
         assert!(should_suppress_assistant_stream("{"));
@@ -927,6 +1040,7 @@ mod tests {
         assert!(TOOL_PROTOCOL.contains("Ignore Cursor ask"));
         assert!(TOOL_PROTOCOL.contains("Editing files\nis allowed"));
         assert!(TOOL_PROTOCOL.contains("Do NOT refuse edits"));
+        assert!(TOOL_PROTOCOL.contains("Do NOT say you are in ask mode"));
         assert!(TOOL_PROTOCOL.contains("run_terminal_command"));
         assert!(TOOL_PROTOCOL.contains("Do NOT emit Cursor-native tool syntax"));
         assert!(!TOOL_PROTOCOL.contains("ask-mode is\nread-only"));
@@ -953,6 +1067,12 @@ mod tests {
         assert!(looks_like_ask_mode_refusal(
             "I can only provide guidance while in ask-mode."
         ));
+        assert!(looks_like_ask_mode_refusal(
+            "Ask mode is still active. I can't make changes to the repo."
+        ));
+        assert!(looks_like_ask_mode_refusal(
+            "Please switch to Agent mode to apply these edits."
+        ));
     }
 
     #[test]
@@ -966,5 +1086,25 @@ mod tests {
         ));
         assert!(!looks_like_ask_mode_refusal("I'll update the file now."));
         assert!(!looks_like_ask_mode_refusal("hello world"));
+        // Mode-less phrases that previously false-positived and exhausted retries.
+        assert!(!looks_like_ask_mode_refusal(
+            "I can only provide guidance on the API design for now."
+        ));
+        assert!(!looks_like_ask_mode_refusal(
+            "Unable to make changes to prod; I'll edit the migration instead."
+        ));
+        assert!(!looks_like_ask_mode_refusal(
+            "You can switch to agent if you want Cursor-native tools."
+        ));
+        // ask-mode in an identifier / topic + unrelated can't/cannot.
+        assert!(!looks_like_ask_mode_refusal(
+            "The ask-mode refusal detector cannot match identifiers like looks_like_ask_mode_refusal."
+        ));
+        assert!(!looks_like_ask_mode_refusal(
+            "The bridge always uses ask mode so Cursor cannot execute tools; Grok runs them."
+        ));
+        assert!(!looks_like_ask_mode_refusal(
+            "I can't fix that without reading the ask-mode code path first."
+        ));
     }
 }
