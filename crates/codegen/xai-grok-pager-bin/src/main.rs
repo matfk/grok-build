@@ -2237,12 +2237,18 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     let bg_update_rx: Option<tokio::sync::oneshot::Receiver<Option<auto_update::UpdateAvailable>>> =
         if should_check_for_updates(args.no_auto_update) {
             let update_config = update_config.clone();
-            let wait_slot = bg_update_wait.clone();
             let (tx, rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
                 let check = auto_update::check_update_background(&update_config).await;
+                // Cursor subscription fork: never download/install the official
+                // binary (that would wipe fork features). Still surface the tip
+                // so the user can `git pull` + rebuild.
                 if let Some(mut child) = check.download {
-                    *wait_slot.lock().await = Some(tokio::spawn(async move { child.wait().await }));
+                    tracing::info!(
+                        "Cursor fork: killing background official updater download"
+                    );
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
                 }
                 let _ = tx.send(check.update);
             });
