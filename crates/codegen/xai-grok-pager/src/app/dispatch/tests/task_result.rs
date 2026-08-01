@@ -1043,12 +1043,13 @@ fn switch_model_complete_success_updates_model_and_pushes_message() {
 fn switch_model_complete_to_cursor_clears_tier_restricted_usage() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    // Simulate Free-tier deny list already applied.
+    // Free tier must not deny /usage (client-side limits are lifted).
     app.subscription_tier = Some("Free".into());
     app.apply_tier_restrictions();
     assert!(
-        app.tier_restricted_commands.iter().any(|c| c == "usage"),
-        "precondition: Free tier restricts /usage"
+        app.tier_restricted_commands.is_empty(),
+        "precondition: Free tier must not restrict /usage, got {:?}",
+        app.tier_restricted_commands
     );
 
     let cursor = acp::ModelId::new(std::sync::Arc::from("cursor/auto"));
