@@ -236,6 +236,29 @@ pub(crate) fn session_usage_block_text(
     )
 }
 
+/// `/usage` Cursor account block from `agent about`.
+pub(crate) fn cursor_usage_block_text(
+    info: &xai_grok_shell::agent::cursor_cli::CursorAccountInfo,
+) -> String {
+    let mut rows = Vec::new();
+    if let Some(tier) = info.subscription_tier.as_deref().filter(|s| !s.is_empty()) {
+        rows.push(format!("  Subscription:  {tier}"));
+    }
+    if let Some(email) = info.user_email.as_deref().filter(|s| !s.is_empty()) {
+        rows.push(format!("  Account:       {email}"));
+    }
+    if let Some(ver) = info.cli_version.as_deref().filter(|s| !s.is_empty()) {
+        rows.push(format!("  CLI version:   {ver}"));
+    }
+    if let Some(model) = info.model.as_deref().filter(|s| !s.is_empty()) {
+        rows.push(format!("  Default model: {model}"));
+    }
+    if rows.is_empty() {
+        return "Cursor usage: account details unavailable.".to_string();
+    }
+    join_header_rows("Cursor usage:".to_string(), rows)
+}
+
 /// Cost cell. Ticks are 1e10 per USD; partial sums are scrubbed to absent.
 fn format_cost(m: &xai_grok_shell::extensions::notification::PromptUsageModel) -> String {
     use xai_grok_shell::extensions::notification::ticks_to_usd;
@@ -297,6 +320,31 @@ mod tests {
             cost_is_partial: false,
             cost_missing_calls: 0,
         }
+    }
+
+    #[test]
+    fn cursor_usage_block_formats_account() {
+        let info = xai_grok_shell::agent::cursor_cli::CursorAccountInfo {
+            subscription_tier: Some("pro".into()),
+            user_email: Some("u@example.com".into()),
+            cli_version: Some("2026.1.1".into()),
+            model: Some("auto".into()),
+        };
+        let text = cursor_usage_block_text(&info);
+        assert!(text.contains("Cursor usage:"));
+        assert!(text.contains("pro"));
+        assert!(text.contains("u@example.com"));
+        assert!(text.contains("2026.1.1"));
+        assert!(text.contains("auto"));
+    }
+
+    #[test]
+    fn cursor_usage_block_empty_fields() {
+        let info = xai_grok_shell::agent::cursor_cli::CursorAccountInfo::default();
+        assert_eq!(
+            cursor_usage_block_text(&info),
+            "Cursor usage: account details unavailable."
+        );
     }
 
     #[test]
