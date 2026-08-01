@@ -2124,7 +2124,8 @@ fn render_welcome_done(
                 width: tip_centered.width.saturating_sub(inset * 2),
                 height: tip_centered.height,
             };
-            let key_name = "ctrl+u";
+            // Cursor subscription fork: tip is informational only. Official
+            // `ctrl+u` restart would install upstream over this build.
             let line = Line::from(vec![
                 Span::styled(
                     "Update: ",
@@ -2133,7 +2134,9 @@ fn render_welcome_done(
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("v{ver} available \u{2014} press {key_name} to restart"),
+                    format!(
+                        "upstream v{ver} available \u{2014} git pull & rebuild (ctrl+u dismisses)"
+                    ),
                     Style::default().fg(theme.accent_user),
                 ),
             ]);
