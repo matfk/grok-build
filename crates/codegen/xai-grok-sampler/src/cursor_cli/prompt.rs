@@ -465,6 +465,89 @@ pub fn should_suppress_assistant_stream(accumulated: &str) -> bool {
         || (t.len() >= 12 && t.contains("\"tool_calls\""))
 }
 
+/// Remove leftover tool-call fences / envelopes from assistant prose.
+///
+/// Used after tools are recovered so `fallback_text` cannot paint raw
+/// `grok-tool-calls` JSON into the UI when extract left residual junk
+/// (duplicated envelope after the fence, wrong fence lang leftovers, etc.).
+fn strip_tool_payload_from_content(content: &str) -> String {
+    let mut out = content.to_owned();
+    out = strip_fenced_tool_payload_blocks(&out, TOOL_CALLS_FENCE);
+    out = strip_fenced_tool_payload_blocks(&out, "json");
+    out = strip_embedded_tool_calls_objects(&out);
+    out.trim().to_owned()
+}
+
+fn strip_fenced_tool_payload_blocks(content: &str, lang: &str) -> String {
+    let open = format!("```{lang}");
+    let mut out = String::new();
+    let mut rest = content;
+    while let Some(start) = rest.find(&open) {
+        out.push_str(&rest[..start]);
+        let after_open = start + open.len();
+        let body_start = if rest[after_open..].starts_with('\n') {
+            after_open + 1
+        } else {
+            after_open
+        };
+        let (json_body, after_fence_idx) =
+            if let Some(close_rel) = rest[body_start..].find("```") {
+                (
+                    rest[body_start..body_start + close_rel].trim(),
+                    body_start + close_rel + 3,
+                )
+            } else {
+                (rest[body_start..].trim(), rest.len())
+            };
+        let is_tool_payload = json_body.contains("tool_calls")
+            || parse_tool_calls_json(json_body).is_some();
+        if !is_tool_payload {
+            // Keep non-tool fences; advance past opener to avoid an infinite loop.
+            out.push_str(&rest[start..after_open]);
+            rest = &rest[after_open..];
+            continue;
+        }
+        rest = &rest[after_fence_idx..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn strip_embedded_tool_calls_objects(content: &str) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    while i < content.len() {
+        let b = content.as_bytes()[i];
+        if b == b'{' {
+            let slice = &content[i..];
+            if slice.contains("\"tool_calls\"") {
+                if let Some(end) = end_of_json_value(slice) {
+                    let candidate = &slice[..end];
+                    if parse_tool_calls_json(candidate).is_some()
+                        || !recover_tool_calls_lenient(candidate).is_empty()
+                        || looks_like_tool_envelope_object(candidate)
+                    {
+                        i += end;
+                        if content[i..].starts_with('\n') {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+        let ch = content[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn looks_like_tool_envelope_object(s: &str) -> bool {
+    let t = s.trim();
+    t.starts_with('{') && t.contains("\"tool_calls\"")
+}
+
 fn extract_fenced_tool_calls(raw: &str, lang: &str) -> Option<ParsedAssistantOutput> {
     let open = format!("```{lang}");
     let start = raw.find(&open)?;
@@ -830,7 +913,11 @@ pub fn build_response(
     message_chunks_emitted: u64,
     cursor_session_id: Option<String>,
 ) -> ConversationResponse {
-    let parsed = parse_assistant_output(raw_text);
+    let mut parsed = parse_assistant_output(raw_text);
+    if !parsed.tool_calls.is_empty() {
+        // Drop residual fence/JSON so shell fallback_text cannot paint it.
+        parsed.content = strip_tool_payload_from_content(&parsed.content);
+    }
     let stop_reason = if parsed.tool_calls.is_empty() {
         StopReason::Stop
     } else {
@@ -1106,5 +1193,46 @@ mod tests {
         assert!(!looks_like_ask_mode_refusal(
             "I can't fix that without reading the ask-mode code path first."
         ));
+    }
+
+    #[test]
+    fn build_response_scrubs_duplicated_envelope_after_fence() {
+        let raw = "I'll check.\n\n```grok-tool-calls\n{\"tool_calls\":[{\"name\":\"read_file\",\"arguments\":{\"target_file\":\"Cargo.toml\"}}]}\n```\n{\"tool_calls\":[{\"name\":\"read_file\",\"arguments\":{\"target_file\":\"Cargo.toml\"}}]}\n";
+        let parsed = parse_assistant_output(raw);
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert!(
+            parsed.content.contains("tool_calls"),
+            "precondition: residual JSON must remain in parse content"
+        );
+
+        let response = build_response(raw, "cursor/auto", None, 0, None);
+        assert_eq!(response.tool_calls().len(), 1);
+        assert_eq!(response.assistant_text(), "I'll check.");
+        assert_eq!(response.fallback_text().as_deref(), Some("I'll check."));
+    }
+
+    #[test]
+    fn build_response_fence_only_has_empty_fallback() {
+        let raw = "```grok-tool-calls\n{\"tool_calls\":[{\"name\":\"read_file\",\"arguments\":{\"target_file\":\"README.md\"}}]}\n```";
+        let response = build_response(raw, "cursor/auto", None, 0, None);
+        assert_eq!(response.tool_calls().len(), 1);
+        assert!(response.assistant_text().is_empty());
+        assert!(response.fallback_text().is_none());
+    }
+
+    #[test]
+    fn strip_removes_residual_fence_and_keeps_prose() {
+        let residual = "Looking now.\n\n```grok-tool-calls\n{\"tool_calls\":[{\"name\":\"grep\",\"arguments\":{\"pattern\":\"x\"}}]}\n```";
+        let scrubbed = strip_tool_payload_from_content(residual);
+        assert_eq!(scrubbed, "Looking now.");
+        assert!(!scrubbed.contains("tool_calls"));
+    }
+
+    #[test]
+    fn strip_removes_tool_envelope_object_from_prose() {
+        let residual = "Done.\n{\"tool_calls\":[{\"name\":\"read_file\",\"arguments\":{\"target_file\":\"a.rs\"}}]}";
+        let scrubbed = strip_tool_payload_from_content(residual);
+        assert_eq!(scrubbed, "Done.");
+        assert!(!scrubbed.contains("tool_calls"));
     }
 }
