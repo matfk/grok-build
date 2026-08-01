@@ -8,23 +8,17 @@
 //! cosmetic slash-command gate and the shell's capability (toolset) gate can't
 //! drift apart.
 //!
-//! "Restricted" tiers are the personal free tier and X Basic — the tiers the
-//! server zero-limits on the Imagine and voice endpoints. Everything else
-//! (SuperGrok, SuperGrok Heavy/Lite, X Premium/+, and any unknown future name)
-//! is unrestricted (**fail-open**).
+//! **Grok Build policy:** client-side free / X Basic feature gates are lifted.
+//! `/usage`, Imagine, voice, and related slash/tool cosmetics stay available
+//! without SuperGrok or Cursor. Server-side quotas (if any) still apply.
 
-/// Whether a **known** subscription-tier display name is a gated tier: the free
-/// tier (CCP display "Free" or an empty string) or X Basic (CCP display
-/// "X Basic"; JWT-claim fallback spelling "x_basic").
+/// Historical free / X Basic classifier. Always returns `false` so pager and
+/// shell never withhold features on tier name alone.
 ///
-/// Case-insensitive and whitespace-trimmed. Callers decide the policy for an
-/// *absent* tier (`None`): the pager treats absence as restricted (cosmetic,
-/// recovers live on the next settings update), while the shell treats absence as
-/// unrestricted (fail-open — the server authoritatively enforces per-tier
-/// limits, so never withhold a capability on a guess).
-pub fn is_restricted_tier_name(tier: &str) -> bool {
-    let t = tier.trim().to_ascii_lowercase();
-    t.is_empty() || t == "free" || t == "x basic" || t == "x_basic"
+/// Callers may still special-case an *absent* tier (`None`); prefer treating
+/// absence as unrestricted to match this policy.
+pub fn is_restricted_tier_name(_tier: &str) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -32,27 +26,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn restricted_names() {
-        assert!(is_restricted_tier_name(""));
-        assert!(is_restricted_tier_name("   "));
-        assert!(is_restricted_tier_name("Free"));
-        assert!(is_restricted_tier_name("free"));
-        assert!(is_restricted_tier_name("X Basic"));
-        assert!(is_restricted_tier_name("x_basic"));
-        assert!(is_restricted_tier_name("  X BASIC  "));
+    fn free_and_x_basic_are_not_client_restricted() {
+        assert!(!is_restricted_tier_name(""));
+        assert!(!is_restricted_tier_name("   "));
+        assert!(!is_restricted_tier_name("Free"));
+        assert!(!is_restricted_tier_name("free"));
+        assert!(!is_restricted_tier_name("X Basic"));
+        assert!(!is_restricted_tier_name("x_basic"));
+        assert!(!is_restricted_tier_name("  X BASIC  "));
     }
 
     #[test]
-    fn unrestricted_names() {
+    fn paid_and_unknown_names_remain_unrestricted() {
         assert!(!is_restricted_tier_name("SuperGrok"));
         assert!(!is_restricted_tier_name("SuperGrok Heavy"));
         assert!(!is_restricted_tier_name("supergrok_lite"));
         assert!(!is_restricted_tier_name("X Premium"));
         assert!(!is_restricted_tier_name("x_premium_plus"));
-        // API keys are not free-tier gated.
         assert!(!is_restricted_tier_name("api_key"));
         assert!(!is_restricted_tier_name("API Key"));
-        // Unknown future tiers fail open.
         assert!(!is_restricted_tier_name("some_new_plan"));
     }
 }
