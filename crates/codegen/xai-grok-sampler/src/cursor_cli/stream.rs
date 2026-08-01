@@ -19,8 +19,8 @@ use super::process::{
     CursorCliError, CursorNdjsonEvent, parse_ndjson_line, read_stdout_lines, spawn_ask_stream,
 };
 use super::prompt::{
-    build_prompt, build_response, looks_like_ask_mode_refusal, looks_like_tool_intent,
-    parse_assistant_output, should_suppress_assistant_stream, tool_calls_required,
+    build_prompt, build_response, looks_like_tool_intent, parse_assistant_output,
+    should_suppress_assistant_stream, tool_calls_required,
 };
 
 /// Options for one Cursor CLI sampling turn.
@@ -53,7 +53,14 @@ pub fn stream_cursor_cli(
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         };
 
-        let resume = opts.resume.filter(|s| !s.is_empty());
+        // Prefer the live session slot over a frozen `opts.resume` snapshot so
+        // in-turn updates to the slot are visible on the next spawn.
+        let resume = opts
+            .session_slot
+            .as_ref()
+            .and_then(|slot| slot.lock().ok().and_then(|g| g.clone()))
+            .or_else(|| opts.resume.clone())
+            .filter(|s| !s.is_empty());
         let is_resume = resume.is_some();
         let workspace = opts.workspace.clone();
         let prompt = build_prompt(&request, is_resume, workspace.as_deref());
@@ -295,34 +302,35 @@ pub fn stream_cursor_cli(
         }
 
         let parsed = parse_assistant_output(&assistant_text);
-        if parsed.tool_calls.is_empty() && tools_offered {
-            let tool_shaped = tools_required || looks_like_tool_intent(&assistant_text);
-            let ask_refusal = looks_like_ask_mode_refusal(&assistant_text);
-            if tool_shaped || ask_refusal {
-                let message = if ask_refusal && !tool_shaped {
-                    "Cursor CLI emitted an ask-mode refusal; retrying".into()
-                } else {
-                    "Cursor CLI emitted a tool-call-shaped response that \
+        // Only retry unparseable tool-shaped output (or ignored native NDJSON
+        // tool_calls). Do NOT fail/retry on ask-mode refusal prose — that
+        // surfaced as "Retry failed: … ask-mode refusal" under Cursor billing
+        // and often false-positived on normal answers. Prompt steering handles
+        // refusals.
+        if parsed.tool_calls.is_empty()
+            && tools_offered
+            && (tools_required
+                || looks_like_tool_intent(&assistant_text)
+                || native_tool_warned)
+        {
+            yield SamplingEvent::Failed {
+                request_id: request_id.clone(),
+                error: SamplingErrorInfo {
+                    kind: SamplingErrorKind::EmptyResponse,
+                    status_code: None,
+                    message: "Cursor CLI emitted a tool-call-shaped response that \
                      could not be parsed; retrying"
-                        .into()
-                };
-                yield SamplingEvent::Failed {
-                    request_id: request_id.clone(),
-                    error: SamplingErrorInfo {
-                        kind: SamplingErrorKind::EmptyResponse,
-                        status_code: None,
-                        message,
-                        is_retryable: true,
-                        retry_after_secs: None,
-                        model_metadata: None,
-                        empty_response_context: None,
-                        doom_loop_triggers: None,
-                        doom_loop_aborted_at_chunk: None,
-                        credential: xai_grok_sampling_types::SentCredential::Unknown,
-                    },
-                };
-                return;
-            }
+                        .into(),
+                    is_retryable: true,
+                    retry_after_secs: None,
+                    model_metadata: None,
+                    empty_response_context: None,
+                    doom_loop_triggers: None,
+                    doom_loop_aborted_at_chunk: None,
+                    credential: xai_grok_sampling_types::SentCredential::Unknown,
+                },
+            };
+            return;
         }
 
         // When tools were offered we never streamed text chunks (buffered for
