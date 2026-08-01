@@ -5402,6 +5402,12 @@ pub(crate) fn to_acp_model_info(
                         reasoning_efforts_meta_value(&info.reasoning_efforts),
                     );
                 }
+                if matches!(info.api_backend, ApiBackend::CursorCli) {
+                    map.insert(
+                        "apiBackend".to_string(),
+                        serde_json::Value::String("cursor_cli".to_string()),
+                    );
+                }
                 if map.is_empty() { None } else { Some(map) }
             };
             (
