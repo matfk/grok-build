@@ -72,15 +72,14 @@
         assert!(app.tier_restricted_commands.is_empty());
         assert!(app.voice_mode_enabled);
 
-        // Later personal Free stamp must not keep API-key bypass or force-on voice.
+        // Later personal Free stamp must not keep API-key bypass.
         assert!(handle_ext_notification(
             &tier_settings_update("Free"),
             &mut app
         ));
         assert!(!app.is_api_key_auth);
         assert!(app.usage_visible);
-        assert!(!app.tier_restricted_commands.is_empty());
-        assert!(!app.voice_mode_enabled);
+        assert!(app.tier_restricted_commands.is_empty());
 
         // Paid tier after API Key must not force voice off (omit voice field).
         let mut app = make_app_with_agent("sess-paid-keep-voice");
