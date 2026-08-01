@@ -402,11 +402,13 @@ mod tests {
 
     #[test]
     fn impose_gate_direct_for_non_consumer_and_already_gated() {
-        // Team session: no live verification possible — show directly.
+        // Team session: no live verification possible — store gate directly.
+        // Client-side SuperGrok gates no longer block access.
         let mut app = test_app();
         app.team_name = Some("Acme Corp".into());
         assert!(app.impose_gate(watch_gate()).is_empty());
-        assert!(!app.has_access());
+        assert!(app.gate.is_some());
+        assert!(app.has_access());
         assert!(app.pending_gate_verification.is_none());
 
         // Already gated: update the copy only.
@@ -482,7 +484,8 @@ mod tests {
         );
 
         app.promote_deferred_gate(app.gate_verify_gen, "verify_timeout");
-        assert!(!app.has_access(), "current generation promotes");
+        assert!(app.gate.is_some(), "current generation promotes into gate");
+        assert!(app.has_access(), "promoted gate must not block client access");
     }
 
     #[test]
