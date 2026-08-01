@@ -444,9 +444,13 @@ pub const AUTH_ERROR_CURSOR_CLI: &str =
 pub const CURSOR_CLI_METHOD_ID: &str = "cursor.cli";
 
 /// Cursor Agent CLI subscription login (`agent login` / `CURSOR_API_KEY`).
+///
+/// Do **not** set `external_provider`: that flag means enterprise
+/// `auth_provider_command` auth and hides `/usage` / grok.com billing for the
+/// whole install. Cursor is an additive inference route (`cursor_cli` meta)
+/// and must not trip that gate.
 pub fn cursor_cli_auth_method() -> acp::AuthMethod {
     let mut meta = acp::Meta::new();
-    meta.insert("external_provider".to_owned(), serde_json::json!(true));
     meta.insert("cursor_cli".to_owned(), serde_json::json!(true));
     acp::AuthMethod::Agent(
         acp::AuthMethodAgent::new(
@@ -1212,6 +1216,22 @@ mod tests {
             built.methods.last().map(|m| AuthMethodKind::from_id(m.id())),
             Some(AuthMethodKind::CursorCli),
             "cursor.cli is additive and must not become the first method",
+        );
+    }
+
+    #[test]
+    fn cursor_cli_auth_method_is_not_external_provider() {
+        let method = cursor_cli_auth_method();
+        let meta = method.meta().expect("cursor.cli must carry meta");
+        assert_eq!(
+            meta.get("cursor_cli").and_then(|v| v.as_bool()),
+            Some(true),
+            "cursor_cli meta marks the Cursor route",
+        );
+        assert_ne!(
+            meta.get("external_provider").and_then(|v| v.as_bool()),
+            Some(true),
+            "external_provider would hide /usage for every Cursor-enabled install",
         );
     }
 
