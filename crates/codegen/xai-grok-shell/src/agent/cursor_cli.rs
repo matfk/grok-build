@@ -17,8 +17,11 @@ use std::sync::OnceLock;
 
 use indexmap::IndexMap;
 use xai_grok_sampler::cursor_cli::{
-    CURSOR_CLI_API_KEY, CURSOR_CLI_BASE_URL, DiscoveredCursorModel, agent_available, list_models,
+    CURSOR_CLI_API_KEY, CURSOR_CLI_BASE_URL, DiscoveredCursorModel, agent_available, fetch_about,
+    list_models,
 };
+
+pub use xai_grok_sampler::cursor_cli::CursorAccountInfo;
 use xai_grok_sampling_types::ApiBackend;
 
 use super::config::{Config, ModelEntry, ModelInfo};
@@ -130,24 +133,20 @@ pub fn is_cursor_billed_model_info(model_id: &str, meta: Option<&serde_json::Map
 
 /// Suppress SuperGrok access gates / upgrade upsells / tier cosmetics.
 ///
-/// - Explicit override ([`cursor_paywall_override_from_disk`]), **or**
-/// - Active/selected model is a Cursor-billed route.
-///
-/// Installing `agent` alone does not suppress paywalls while the user is on
-/// xAI free-tier models.
+/// Grok Build policy: always suppress. Free / X Basic users keep `/usage`,
+/// Imagine, voice, and chat without SuperGrok or a Cursor-billed model.
+/// `active_model_id` is retained for call-site compatibility.
 pub fn suppress_supergrok_paywalls(active_model_id: Option<&str>) -> bool {
-    if cursor_paywall_override_from_disk() {
-        return true;
-    }
-    active_model_id.is_some_and(is_cursor_billed_model)
+    let _ = active_model_id;
+    let _ = cursor_paywall_override_from_disk();
+    true
 }
 
-/// Shell-side variant with live [`Config`] (explicit override from cfg, not disk cache).
+/// Shell-side variant with live [`Config`] (same always-on policy).
 pub fn suppress_supergrok_paywalls_cfg(cfg: &Config, active_model_id: Option<&str>) -> bool {
-    if cursor_paywall_override(cfg) {
-        return true;
-    }
-    active_model_id.is_some_and(is_cursor_billed_model)
+    let _ = (cfg, active_model_id);
+    let _ = cursor_paywall_override(cfg);
+    true
 }
 
 /// Deprecated name: prefer [`suppress_supergrok_paywalls_cfg`] with the active model.
@@ -175,6 +174,16 @@ pub fn cursor_authenticated() -> bool {
 /// Run `agent login` (blocking). Used by `/login cursor`.
 pub fn run_agent_login() -> Result<(), String> {
     xai_grok_sampler::cursor_cli::run_agent_login().map_err(|e| e.to_string())
+}
+
+/// Run `agent about --format json` (blocking). Used by `/usage` for Cursor account.
+pub fn fetch_cursor_account() -> Result<CursorAccountInfo, String> {
+    fetch_about().map_err(|e| e.to_string())
+}
+
+/// True when the Cursor Agent CLI binary appears runnable (cached).
+pub fn cursor_agent_available() -> bool {
+    agent_available_cached()
 }
 
 /// Invalidate cached discovery so a post-login catalog refresh sees new models.
@@ -216,6 +225,21 @@ fn cached_discovered_models() -> Result<Vec<DiscoveredCursorModel>, String> {
     fresh
 }
 
+/// Display name for a Cursor CLI catalog entry.
+///
+/// Cursor's `--list-models` often already includes a "Cursor …" brand in the
+/// name (e.g. "Cursor Grok 4.5 Low"). Prefixing again would render
+/// "Cursor: Cursor Grok …". Only add the provider tag when the CLI name does
+/// not already start with "Cursor".
+fn cursor_display_name(discovered_name: &str) -> String {
+    let trimmed = discovered_name.trim();
+    if trimmed.to_ascii_lowercase().starts_with("cursor") {
+        trimmed.to_owned()
+    } else {
+        format!("Cursor: {trimmed}")
+    }
+}
+
 fn model_entry_for(discovered: &DiscoveredCursorModel) -> (String, ModelEntry) {
     let key = catalog_key(&discovered.id);
     let cw = NonZeroU64::new(DEFAULT_CURSOR_CONTEXT_WINDOW).expect("non-zero");
@@ -224,7 +248,7 @@ fn model_entry_for(discovered: &DiscoveredCursorModel) -> (String, ModelEntry) {
             id: Some(key.clone()),
             model: discovered.id.clone(),
             base_url: CURSOR_CLI_BASE_URL.to_owned(),
-            name: Some(format!("Cursor: {}", discovered.name)),
+            name: Some(cursor_display_name(&discovered.name)),
             description: Some(
                 "Routed through Cursor Agent CLI. Uses your Cursor subscription.".into(),
             ),
@@ -247,11 +271,11 @@ fn model_entry_for(discovered: &DiscoveredCursorModel) -> (String, ModelEntry) {
             user_selectable: true,
             supported_in_api: true,
             reasoning_effort: None,
-            supports_reasoning_effort: discovered.id.contains("thinking")
-                || discovered.id.contains("-high")
-                || discovered.id.contains("-xhigh")
-                || discovered.id.contains("-medium")
-                || discovered.id.contains("-low"),
+            // Effort is baked into Cursor model variants (…-low / …-high in the
+            // id and "Low"/"High" in the display name). Grok `/effort` does not
+            // apply — advertising support would append "(low)" in the prompt
+            // info bar and chain `/model` into an effort picker.
+            supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
             compactions_remaining: None,
@@ -366,13 +390,11 @@ mod tests {
     }
 
     #[test]
-    fn paywalls_not_suppressed_without_model_or_override() {
-        // No explicit override in this process (tests must not rely on PATH).
-        // suppress with None only true when override is set.
+    fn paywalls_always_suppressed() {
         let _ = cursor_paywall_override_from_disk(); // warm cache
-        // Active Cursor model always suppresses regardless of override.
+        assert!(suppress_supergrok_paywalls(None));
         assert!(suppress_supergrok_paywalls(Some("cursor/auto")));
-        assert!(!suppress_supergrok_paywalls(Some("grok-4")));
+        assert!(suppress_supergrok_paywalls(Some("grok-4")));
     }
 
     #[test]
@@ -384,5 +406,40 @@ mod tests {
         );
         assert!(is_cursor_billed_model_info("my-cursor-model", Some(&meta)));
         assert!(!is_cursor_billed_model_info("grok-4", None));
+    }
+
+    #[test]
+    fn cursor_display_name_dedupes_leading_cursor_brand() {
+        assert_eq!(
+            cursor_display_name("Cursor Grok 4.5 Low"),
+            "Cursor Grok 4.5 Low"
+        );
+        assert_eq!(cursor_display_name("cursor grok"), "cursor grok");
+        assert_eq!(cursor_display_name("Auto"), "Cursor: Auto");
+        assert_eq!(cursor_display_name("Composer 2"), "Cursor: Composer 2");
+    }
+
+    #[test]
+    fn cursor_model_entry_hides_effort_and_dedupes_name() {
+        let (_key, entry) = model_entry_for(&DiscoveredCursorModel {
+            id: "cursor-grok-4.5-low".into(),
+            name: "Cursor Grok 4.5 Low".into(),
+        });
+        assert_eq!(
+            entry.info.name.as_deref(),
+            Some("Cursor Grok 4.5 Low"),
+            "must not render as 'Cursor: Cursor Grok …'"
+        );
+        assert!(
+            !entry.info.supports_reasoning_effort,
+            "Cursor variants bake effort into the model id; /effort must stay off"
+        );
+
+        let (_key, auto) = model_entry_for(&DiscoveredCursorModel {
+            id: "auto".into(),
+            name: "Auto".into(),
+        });
+        assert_eq!(auto.info.name.as_deref(), Some("Cursor: Auto"));
+        assert!(!auto.info.supports_reasoning_effort);
     }
 }
