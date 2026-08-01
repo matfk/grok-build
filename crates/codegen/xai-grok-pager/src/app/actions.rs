@@ -2085,6 +2085,8 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
+    /// Fetch Cursor account/subscription via `agent about` for `/usage`.
+    FetchCursorUsage { agent_id: AgentId },
     /// Re-fetch remote settings to check subscription gate.
     RefreshGate,
     /// Spawn a debounce sleep task for shell suggestions. `agent_id` rides
@@ -2640,6 +2642,18 @@ pub enum TaskResult {
     SessionUsageFailed {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        error: String,
+    },
+    /// `/usage` Cursor account block ready. Chains SuperGrok credits next.
+    CursorUsageComplete {
+        agent_id: AgentId,
+        info: Box<xai_grok_shell::agent::cursor_cli::CursorAccountInfo>,
+    },
+    /// `/usage` Cursor account fetch failed or CLI missing. Still chains credits.
+    CursorUsageFailed {
+        agent_id: AgentId,
+        /// When true, skip the error system line (CLI not installed).
+        silent: bool,
         error: String,
     },
     /// Feedback submitted successfully (fire-and-forget).
