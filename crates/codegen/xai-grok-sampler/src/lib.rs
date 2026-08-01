@@ -43,8 +43,8 @@ pub use config::{
     SharedBearerResolver, SharedHeaderInjector,
 };
 pub use cursor_cli::{
-    CURSOR_CLI_API_KEY, CURSOR_CLI_BASE_URL, CursorCliMode, CursorCliStreamOpts,
-    DiscoveredCursorModel, agent_available, agent_bin, list_models, run_agent_login,
+    CURSOR_CLI_API_KEY, CURSOR_CLI_BASE_URL, CursorAccountInfo, CursorCliMode, CursorCliStreamOpts,
+    DiscoveredCursorModel, agent_available, agent_bin, fetch_about, list_models, run_agent_login,
 };
 pub use doom_loop::DoomLoopSignalCollector;
 pub use events::{SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
