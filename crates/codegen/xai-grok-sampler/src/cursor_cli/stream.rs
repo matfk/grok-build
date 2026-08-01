@@ -19,8 +19,8 @@ use super::process::{
     CursorCliError, CursorNdjsonEvent, parse_ndjson_line, read_stdout_lines, spawn_ask_stream,
 };
 use super::prompt::{
-    build_prompt, build_response, looks_like_tool_intent, parse_assistant_output,
-    should_suppress_assistant_stream, tool_calls_required,
+    build_prompt, build_response, looks_like_ask_mode_refusal, looks_like_tool_intent,
+    parse_assistant_output, should_suppress_assistant_stream, tool_calls_required,
 };
 
 /// Options for one Cursor CLI sampling turn.
@@ -58,6 +58,12 @@ pub fn stream_cursor_cli(
         let workspace = opts.workspace.clone();
         let prompt = build_prompt(&request, is_resume, workspace.as_deref());
         let tools_required = tool_calls_required(&request);
+        // Agent turns always offer tools. Live-streaming assistant text is unsafe
+        // here: Cursor often emits a `grok-tool-calls` fence (or raw JSON) in
+        // small deltas, and early tokens reach the UI before suppress can fire.
+        // Buffer text until final parse; shell `fallback_text` delivers clean
+        // prose when `message_chunks_emitted == 0`.
+        let tools_offered = !request.tools.is_empty();
 
         let spawned = match spawn_ask_stream(
             &model,
@@ -74,6 +80,7 @@ pub fn stream_cursor_cli(
             }
         };
         let mut child = spawned.child;
+        let stderr_task = spawned.stderr_task;
         let _temp_workspace = spawned.temp_workspace;
 
         let mut lines = std::pin::pin!(read_stdout_lines(spawned.stdout));
@@ -137,18 +144,6 @@ pub fn stream_cursor_cli(
                             let Some(delta) = merge_assistant_delta(&mut assistant_text, &text) else {
                                 continue;
                             };
-                            // Hold back tool-call JSON/fences so they never flash
-                            // into the transcript as a finished assistant message.
-                            if should_suppress_assistant_stream(&assistant_text) {
-                                if !first_token {
-                                    first_token = true;
-                                    yield SamplingEvent::FirstToken {
-                                        request_id: request_id.clone(),
-                                    };
-                                }
-                                chunk_timestamps.push(Instant::now());
-                                continue;
-                            }
                             if !first_token {
                                 first_token = true;
                                 yield SamplingEvent::FirstToken {
@@ -156,6 +151,16 @@ pub fn stream_cursor_cli(
                                 };
                             }
                             chunk_timestamps.push(Instant::now());
+                            // With tools offered: never stream text live (see
+                            // `tools_offered` above). Reasoning still streams.
+                            if tools_offered {
+                                continue;
+                            }
+                            // No-tools turns: still hold back obvious tool JSON
+                            // so a stray fence cannot flash into the UI.
+                            if should_suppress_assistant_stream(&assistant_text) {
+                                continue;
+                            }
                             message_chunks += 1;
                             let idx = chunk_index;
                             chunk_index += 1;
@@ -218,11 +223,18 @@ pub fn stream_cursor_cli(
             }
         }
 
-        let stderr = drain_stderr(&mut child).await;
+        // stderr was drained concurrently from spawn; join after stdout ends.
+        let stderr = match stderr_task.await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "Cursor Agent CLI stderr drain task failed");
+                String::new()
+            }
+        };
         let wait_status = child.wait().await;
 
         match wait_status {
-            Ok(status) if status.success() || (fatal.is_none() && !assistant_text.is_empty()) => {
+            Ok(status) if status.success() => {
                 // Auth failures often exit 0 with an empty stream and a stderr
                 // message — treat those as fatal instead of empty-response retries.
                 if assistant_text.is_empty()
@@ -233,6 +245,8 @@ pub fn stream_cursor_cli(
                 }
             }
             Ok(status) if !status.success() && fatal.is_none() => {
+                // Do not soft-accept non-zero exits just because some assistant
+                // tokens arrived — that commits truncated/partial turns.
                 fatal = Some(classify_cli_stderr(&stderr, status.code()).unwrap_or_else(|| {
                     CursorCliError::Exit {
                         code: status.code(),
@@ -274,39 +288,48 @@ pub fn stream_cursor_cli(
                     empty_response_context: None,
                     doom_loop_triggers: None,
                     doom_loop_aborted_at_chunk: None,
+                    credential: xai_grok_sampling_types::SentCredential::Unknown,
                 },
             };
             return;
         }
 
         let parsed = parse_assistant_output(&assistant_text);
-        let tools_offered = !request.tools.is_empty();
-        if parsed.tool_calls.is_empty()
-            && tools_offered
-            && (tools_required || looks_like_tool_intent(&assistant_text))
-        {
-            yield SamplingEvent::Failed {
-                request_id: request_id.clone(),
-                error: SamplingErrorInfo {
-                    kind: SamplingErrorKind::EmptyResponse,
-                    status_code: None,
-                    message: "Cursor CLI emitted a tool-call-shaped response that \
-                         could not be parsed; retrying"
-                        .into(),
-                    is_retryable: true,
-                    retry_after_secs: None,
-                    model_metadata: None,
-                    empty_response_context: None,
-                    doom_loop_triggers: None,
-                    doom_loop_aborted_at_chunk: None,
-                },
-            };
-            return;
+        if parsed.tool_calls.is_empty() && tools_offered {
+            let tool_shaped = tools_required || looks_like_tool_intent(&assistant_text);
+            let ask_refusal = looks_like_ask_mode_refusal(&assistant_text);
+            if tool_shaped || ask_refusal {
+                let message = if ask_refusal && !tool_shaped {
+                    "Cursor CLI emitted an ask-mode refusal; retrying".into()
+                } else {
+                    "Cursor CLI emitted a tool-call-shaped response that \
+                     could not be parsed; retrying"
+                        .into()
+                };
+                yield SamplingEvent::Failed {
+                    request_id: request_id.clone(),
+                    error: SamplingErrorInfo {
+                        kind: SamplingErrorKind::EmptyResponse,
+                        status_code: None,
+                        message,
+                        is_retryable: true,
+                        retry_after_secs: None,
+                        model_metadata: None,
+                        empty_response_context: None,
+                        doom_loop_triggers: None,
+                        doom_loop_aborted_at_chunk: None,
+                        credential: xai_grok_sampling_types::SentCredential::Unknown,
+                    },
+                };
+                return;
+            }
         }
 
-        // Tool payloads were suppressed from the text channel; keep
-        // message_chunks at whatever plain-text count we emitted.
-        let message_chunks = if !parsed.tool_calls.is_empty() {
+        // When tools were offered we never streamed text chunks (buffered for
+        // final parse). Force 0 so shell `fallback_text` can emit clean prose
+        // without replaying any tool JSON that never reached the UI.
+        // Tool-only turns keep message_chunks at 0 as well.
+        let message_chunks = if tools_offered || !parsed.tool_calls.is_empty() {
             0
         } else {
             message_chunks
@@ -356,16 +379,6 @@ fn merge_assistant_delta(acc: &mut String, text: &str) -> Option<String> {
     }
 }
 
-async fn drain_stderr(child: &mut tokio::process::Child) -> String {
-    let Some(mut err) = child.stderr.take() else {
-        return String::new();
-    };
-    use tokio::io::AsyncReadExt;
-    let mut buf = String::new();
-    let _ = err.read_to_string(&mut buf).await;
-    buf
-}
-
 fn is_auth_stderr(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
     lower.contains("authentication required")
@@ -409,6 +422,29 @@ fn failed_event(request_id: &RequestId, err: CursorCliError) -> SamplingEvent {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_sampling_types::SentCredential::Unknown,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_assistant_delta_handles_cumulative_snapshots() {
+        let mut acc = String::new();
+        assert_eq!(merge_assistant_delta(&mut acc, "Hel").as_deref(), Some("Hel"));
+        assert_eq!(merge_assistant_delta(&mut acc, "Hello").as_deref(), Some("lo"));
+        assert_eq!(merge_assistant_delta(&mut acc, "Hello").as_deref(), None);
+        assert_eq!(acc, "Hello");
+    }
+
+    #[test]
+    fn merge_assistant_delta_appends_pure_deltas() {
+        let mut acc = String::new();
+        assert_eq!(merge_assistant_delta(&mut acc, "a").as_deref(), Some("a"));
+        assert_eq!(merge_assistant_delta(&mut acc, "b").as_deref(), Some("b"));
+        assert_eq!(acc, "ab");
     }
 }

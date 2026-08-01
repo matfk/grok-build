@@ -79,6 +79,60 @@ pub fn list_models() -> Result<Vec<DiscoveredCursorModel>, CursorCliError> {
     Ok(parse_list_models(&stdout))
 }
 
+/// Account / subscription snapshot from `agent about --format json`.
+///
+/// Used by `/usage` to show Cursor billing alongside SuperGrok credits.
+/// Field names match Cursor CLI JSON (`subscriptionTier`, `userEmail`, …).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorAccountInfo {
+    pub subscription_tier: Option<String>,
+    pub user_email: Option<String>,
+    pub cli_version: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// Run `agent about --format json` and parse the account/subscription fields.
+pub fn fetch_about() -> Result<CursorAccountInfo, CursorCliError> {
+    let bin = agent_bin();
+    let output = std::process::Command::new(&bin)
+        .arg("about")
+        .arg("--format")
+        .arg("json")
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                CursorCliError::NotFound
+            } else {
+                CursorCliError::Spawn(e)
+            }
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(CursorCliError::Exit {
+            code: output.status.code(),
+            stderr,
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_about_json(&stdout).ok_or_else(|| CursorCliError::Exit {
+        code: Some(1),
+        stderr: format!("failed to parse agent about JSON: {}", stdout.trim()),
+    })
+}
+
+fn parse_about_json(stdout: &str) -> Option<CursorAccountInfo> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // CLI sometimes prints banners before JSON — take the outermost object.
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    serde_json::from_str(&trimmed[start..=end]).ok()
+}
+
 /// Run interactive `agent login` (opens Cursor's browser / device flow).
 ///
 /// Stdio is inherited so the user can complete the flow in the same terminal
@@ -141,6 +195,10 @@ fn parse_list_models(stdout: &str) -> Vec<DiscoveredCursorModel> {
 pub struct SpawnedCursorAgent {
     pub child: Child,
     pub stdout: ChildStdout,
+    /// Concurrent stderr drain started at spawn time. Avoids the classic
+    /// deadlock where a chatty CLI fills the OS stderr pipe while the parent
+    /// is still blocked reading stdout.
+    pub stderr_task: tokio::task::JoinHandle<String>,
     /// Keeps a fallback temp workspace alive for the child lifetime when no
     /// real project cwd was supplied.
     pub(crate) temp_workspace: Option<tempfile::TempDir>,
@@ -246,10 +304,21 @@ pub async fn spawn_ask_stream(
     let stdout = child.stdout.take().ok_or_else(|| {
         CursorCliError::Io(std::io::Error::other("missing Cursor Agent CLI stdout"))
     })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        CursorCliError::Io(std::io::Error::other("missing Cursor Agent CLI stderr"))
+    })?;
+    let stderr_task = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = String::new();
+        let mut err = stderr;
+        let _ = err.read_to_string(&mut buf).await;
+        buf
+    });
 
     Ok(SpawnedCursorAgent {
         child,
         stdout,
+        stderr_task,
         temp_workspace: temp_hold,
     })
 }
@@ -394,6 +463,29 @@ mod tests {
     #[test]
     fn cursor_cli_mode_defaults_to_ask() {
         assert_eq!(CursorCliMode::default(), CursorCliMode::Ask);
+    }
+
+    #[test]
+    fn parses_about_json_camel_case() {
+        let sample = r#"{
+  "subscriptionTier": "pro",
+  "userEmail": "user@example.com",
+  "cliVersion": "2026.01.01",
+  "model": "auto"
+}"#;
+        let info = parse_about_json(sample).expect("parse");
+        assert_eq!(info.subscription_tier.as_deref(), Some("pro"));
+        assert_eq!(info.user_email.as_deref(), Some("user@example.com"));
+        assert_eq!(info.cli_version.as_deref(), Some("2026.01.01"));
+        assert_eq!(info.model.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn parses_about_json_with_leading_banner() {
+        let sample = "Some banner\n{\"subscriptionTier\":\"free\",\"userEmail\":\"a@b.c\"}\n";
+        let info = parse_about_json(sample).expect("parse");
+        assert_eq!(info.subscription_tier.as_deref(), Some("free"));
+        assert_eq!(info.user_email.as_deref(), Some("a@b.c"));
     }
 
     #[test]
