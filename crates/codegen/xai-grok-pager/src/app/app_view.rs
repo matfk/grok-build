@@ -560,22 +560,12 @@ fn parse_esc_ttl(raw: Option<String>) -> Duration {
 ///   slash registry)
 pub(crate) const TIER_RESTRICTED_COMMANDS: &[&str] =
     &["usage", "imagine", "imagine-video", "voice"];
-/// Whether a subscription-tier display name is a tier with restricted
-/// commands: the free tier (no subscription ⇒ `None`, or an explicit
-/// "Free") and X Basic (CCP display name "X Basic"; JWT claim fallback
-/// "x_basic"). Everything else — paid tiers and unknown future names —
-/// is unrestricted (fail-open).
+/// Whether a subscription tier should hide [`TIER_RESTRICTED_COMMANDS`].
 ///
-/// The string classification is shared with the shell's capability
-/// (toolset) gate via [`xai_grok_shell::tier::is_restricted_tier_name`] so
-/// the two can't drift. The pager's *cosmetic* slash-command gate treats an
-/// absent tier (`None`) as restricted (it recovers live on the next settings
-/// update); the shell's capability gate treats absence as unrestricted.
-fn is_restricted_tier(tier: Option<&str>) -> bool {
-    match tier {
-        None => true,
-        Some(t) => xai_grok_shell::tier::is_restricted_tier_name(t),
-    }
+/// Always `false`: Grok Build does not withhold `/usage`, Imagine, or voice
+/// on free / X Basic. Kept as a helper so call sites and tests stay stable.
+fn is_restricted_tier(_tier: Option<&str>) -> bool {
+    false
 }
 /// True for API-key labels from shell/CCP: `"ApiKey"`, `"API Key"`, `"api_key"`.
 pub(crate) fn is_api_key_label(s: &str) -> bool {
@@ -1235,16 +1225,15 @@ impl AppView {
     pub fn is_zdr_blocked(&self) -> bool {
         self.is_zdr && !self.zdr_access_enabled
     }
-    /// User is not gated (no gate from remote settings or subscription fallback).
+    /// User may use the prompt UI (subscription SuperGrok gates are ignored).
     ///
-    /// A Cursor-billed active model (or an explicit `cursor_cli = true` override)
-    /// also counts as access: inference bills to Cursor, so SuperGrok paywalls
-    /// must not block the UI. Installing the CLI alone does not.
+    /// Grok Build lifts free-tier / SuperGrok access paywalls client-side so
+    /// `/usage` and chatting work without a paid plan or Cursor. ZDR still
+    /// blocks via [`Self::is_zdr_blocked`]. Cursor-billed routes remain a
+    /// documented bypass for forks that re-enable `self.gate` checks.
     pub fn has_access(&self) -> bool {
-        self.gate.is_none()
-            || xai_grok_shell::agent::cursor_cli::suppress_supergrok_paywalls(
-                self.active_model_id_for_paywall(),
-            )
+        let _ = self.active_model_id_for_paywall();
+        true
     }
 
     /// Model id used for Cursor paywall policy (session model, else app default).
@@ -1719,13 +1708,15 @@ impl AppView {
         let cursor_bypass = xai_grok_shell::agent::cursor_cli::suppress_supergrok_paywalls(
             self.active_model_id_for_paywall(),
         );
-        // Suppressing SuperGrok upsells must not leave free_usage_blocked stuck
+        // Never leave free_usage_blocked stuck when SuperGrok upsells are off
         // (otherwise prompts stay dead with no modal to clear the flag).
         if cursor_bypass {
             for agent in self.agents.values_mut() {
                 agent.session.free_usage_blocked = false;
             }
         }
+        // Free / X Basic client deny lists are disabled (`is_restricted_tier`
+        // always false); keep the full predicate for call-site clarity.
         let restricted = !cursor_bypass
             && self.team_name.is_none()
             && !self.is_api_key_auth
@@ -7497,19 +7488,13 @@ pub(crate) mod tests {
             ..Default::default()
         });
         assert!(!app.is_api_key_auth);
-        assert!(!app.voice_mode_enabled);
         assert!(app.usage_visible);
-        assert!(!app.tier_restricted_commands.is_empty());
+        assert!(app.tier_restricted_commands.is_empty());
+        assert_tier_restricted_commands_present(&app);
     }
-    fn expected_tier_restricted_commands() -> Vec<String> {
-        TIER_RESTRICTED_COMMANDS
-            .iter()
-            .map(|n| (*n).to_string())
-            .collect()
-    }
-    /// Make every tier-restricted command visible on the welcome prompt so the
-    /// present/absent assertions exercise the deny list, not incidental
-    /// fail-closed hiding:
+    /// Make every formerly tier-restricted command visible on the welcome prompt
+    /// so present assertions exercise availability, not incidental fail-closed
+    /// hiding:
     /// - `/imagine`, `/imagine-video` are `required_tools()`-gated, so advertise
     ///   their tools (otherwise the registry fail-closes them).
     /// - `/voice` is fail-closed hidden until the remote flag turns it on, so
@@ -7528,16 +7513,6 @@ pub(crate) mod tests {
             );
         app.welcome_prompt.set_voice_visible(true);
     }
-    fn assert_tier_restricted_commands_absent(app: &AppView) {
-        let reg = app.welcome_prompt.slash_controller.registry();
-        for name in TIER_RESTRICTED_COMMANDS {
-            assert!(
-                reg.get(name).is_none(),
-                "/{name} must be denied on a restricted tier"
-            );
-        }
-        assert!(reg.get("cost").is_none(), "/cost alias must be denied");
-    }
     fn assert_tier_restricted_commands_present(app: &AppView) {
         let reg = app.welcome_prompt.slash_controller.registry();
         for name in TIER_RESTRICTED_COMMANDS {
@@ -7548,19 +7523,17 @@ pub(crate) mod tests {
         }
     }
     #[test]
-    fn apply_auth_meta_restricts_usage_for_free_tier() {
+    fn apply_auth_meta_keeps_usage_for_free_tier() {
         let mut app = test_app();
         advertise_media_tools(&mut app);
         app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
-        assert_eq!(
-            app.tier_restricted_commands,
-            expected_tier_restricted_commands()
-        );
-        assert_tier_restricted_commands_absent(&app);
+        assert!(app.tier_restricted_commands.is_empty());
+        assert_tier_restricted_commands_present(&app);
         assert!(app.usage_visible);
+        assert!(app.welcome_prompt.slash_controller.usage_command_visible());
     }
     #[test]
-    fn apply_auth_meta_restricts_usage_for_x_basic_tier() {
+    fn apply_auth_meta_keeps_usage_for_x_basic_tier() {
         let mut app = test_app();
         advertise_media_tools(&mut app);
         let meta = xai_grok_shell::auth::AuthMeta {
@@ -7568,14 +7541,11 @@ pub(crate) mod tests {
             ..Default::default()
         };
         app.apply_auth_meta(&meta);
-        assert_eq!(
-            app.tier_restricted_commands,
-            expected_tier_restricted_commands()
-        );
-        assert_tier_restricted_commands_absent(&app);
+        assert!(app.tier_restricted_commands.is_empty());
+        assert_tier_restricted_commands_present(&app);
     }
     #[test]
-    fn apply_auth_meta_lifts_restrictions_for_paid_tiers_and_teams() {
+    fn apply_auth_meta_keeps_features_for_paid_tiers_and_teams() {
         let mut app = test_app();
         advertise_media_tools(&mut app);
         let meta = xai_grok_shell::auth::AuthMeta {
@@ -7588,7 +7558,7 @@ pub(crate) mod tests {
         let mut app = test_app();
         advertise_media_tools(&mut app);
         app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
-        assert!(!app.tier_restricted_commands.is_empty());
+        assert!(app.tier_restricted_commands.is_empty());
         app.subscription_tier = Some("SuperGrok".into());
         app.apply_tier_restrictions();
         assert!(app.tier_restricted_commands.is_empty());
@@ -7604,11 +7574,11 @@ pub(crate) mod tests {
     }
     #[test]
     fn is_restricted_tier_classification() {
-        assert!(is_restricted_tier(None));
-        assert!(is_restricted_tier(Some("")));
-        assert!(is_restricted_tier(Some("Free")));
-        assert!(is_restricted_tier(Some("X Basic")));
-        assert!(is_restricted_tier(Some("x_basic")));
+        assert!(!is_restricted_tier(None));
+        assert!(!is_restricted_tier(Some("")));
+        assert!(!is_restricted_tier(Some("Free")));
+        assert!(!is_restricted_tier(Some("X Basic")));
+        assert!(!is_restricted_tier(Some("x_basic")));
         assert!(!is_restricted_tier(Some("SuperGrok")));
         assert!(!is_restricted_tier(Some("SuperGrok Heavy")));
         assert!(!is_restricted_tier(Some("X Premium")));
@@ -7623,7 +7593,7 @@ pub(crate) mod tests {
     fn is_voice_tier_restricted_tracks_tier() {
         let mut app = test_app();
         app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
-        assert!(app.is_voice_tier_restricted());
+        assert!(!app.is_voice_tier_restricted());
         let mut app = test_app();
         let meta = xai_grok_shell::auth::AuthMeta {
             subscription_tier: Some("SuperGrok".into()),
@@ -7640,7 +7610,9 @@ pub(crate) mod tests {
             url: Some("https://grok.com/supergrok?referrer=grok-build".into()),
             label: None,
         });
-        assert!(app.is_access_blocked());
+        // Client-side SuperGrok gates no longer block the prompt.
+        assert!(!app.is_access_blocked());
+        assert!(app.has_access());
         let meta = xai_grok_shell::auth::AuthMeta::default();
         app.apply_auth_meta(&meta);
         assert!(app.gate.is_none());
@@ -7661,7 +7633,9 @@ pub(crate) mod tests {
         };
         app.apply_auth_meta(&meta);
         assert!(app.gate.is_some());
-        assert!(app.is_access_blocked());
+        // Gate metadata may remain, but access is not blocked client-side.
+        assert!(!app.is_access_blocked());
+        assert!(app.has_access());
     }
     #[test]
     fn welcome_ctrl_q_requires_confirmation() {
