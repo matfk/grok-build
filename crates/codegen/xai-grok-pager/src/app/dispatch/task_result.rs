@@ -41,7 +41,7 @@ use super::session::load::{
 use super::session::modal::remove_agent_and_cleanup;
 use super::settings::ui::apply_setting_rollback;
 use super::status::{
-    commit_session_usage_block, handle_coding_data_sharing_failed,
+    commit_cursor_usage_block, commit_session_usage_block, handle_coding_data_sharing_failed,
     handle_coding_data_sharing_updated, handle_context_info_complete, scrub_error_for_toast,
 };
 use super::transcript::{
@@ -1039,6 +1039,24 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent_id,
             &session_id,
             format!("Couldn't load session usage: {error}"),
+        ),
+        TaskResult::CursorUsageComplete { agent_id, info } => commit_cursor_usage_block(
+            app,
+            agent_id,
+            Some(crate::app::status_blocks::cursor_usage_block_text(&info)),
+        ),
+        TaskResult::CursorUsageFailed {
+            agent_id,
+            silent,
+            error,
+        } => commit_cursor_usage_block(
+            app,
+            agent_id,
+            if silent {
+                None
+            } else {
+                Some(format!("Couldn't load Cursor usage: {error}"))
+            },
         ),
         TaskResult::FeedbackComplete { .. } => vec![],
         TaskResult::FeedbackFailed { agent_id, error } => {
