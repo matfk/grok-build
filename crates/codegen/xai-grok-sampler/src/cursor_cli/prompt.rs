@@ -45,6 +45,12 @@ const TOOL_EXAMPLE: &str = r#"Example (illustrative — prefer exact Available t
 ```grok-tool-calls
 {"tool_calls":[{"name":"read_file","arguments":{"target_file":"README.md"}}]}
 ```
+
+Edits are normal — use `search_replace` / `write` the same way (Grok executes them):
+
+```grok-tool-calls
+{"tool_calls":[{"name":"search_replace","arguments":{"file_path":"src/main.rs","old_string":"foo","new_string":"bar"}}]}
+```
 "#;
 
 /// Build the text prompt passed to `agent --print`.
@@ -297,6 +303,67 @@ fn looks_like_cursor_native_tool_ui(t: &str) -> bool {
     false
 }
 
+/// True when the assistant text is a Cursor ask-mode / read-only refusal.
+///
+/// High-precision only: requires both a mode cue and a refusal cue so ordinary
+/// answers that mention ask mode (docs, explanations) are not retried.
+/// Used with tools-offered turns to resample instead of finishing with a no-op.
+pub fn looks_like_ask_mode_refusal(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    if lower.trim().is_empty() {
+        return false;
+    }
+
+    // Tight whole-phrase hits — almost never legitimate task answers.
+    const PHRASES: &[&str] = &[
+        "i'm in ask mode",
+        "i am in ask mode",
+        "currently in ask mode",
+        "we're in ask mode",
+        "we are in ask mode",
+        "switch to agent mode",
+        "switch to agent",
+        "switch out of ask",
+        "can't make changes in ask",
+        "cannot make changes in ask",
+        "can't edit in ask",
+        "cannot edit in ask",
+        "unable to edit files",
+        "unable to make changes",
+        "i can only answer questions",
+        "i can only provide guidance",
+        "ask mode is read-only",
+        "ask-mode is read-only",
+        "in ask mode, i can't",
+        "in ask mode i can't",
+        "in ask mode, i cannot",
+        "in ask mode i cannot",
+    ];
+    if PHRASES.iter().any(|p| lower.contains(p)) {
+        return true;
+    }
+
+    // Broader combo: mode cue + refusal cue in the same reply.
+    let mode_cue = lower.contains("ask mode")
+        || lower.contains("ask-mode")
+        || lower.contains("agent mode")
+        || lower.contains("read-only mode")
+        || lower.contains("readonly mode");
+    if !mode_cue {
+        return false;
+    }
+    lower.contains("can't")
+        || lower.contains("cannot")
+        || lower.contains("unable")
+        || lower.contains("won't")
+        || lower.contains("will not")
+        || lower.contains("switch to")
+        || lower.contains("only answer")
+        || lower.contains("only provide")
+        || lower.contains("don't have access")
+        || lower.contains("do not have access")
+}
+
 /// True when streaming text should be held back from the UI (likely a tool payload).
 pub fn should_suppress_assistant_stream(accumulated: &str) -> bool {
     let t = accumulated.trim_start();
@@ -415,8 +482,11 @@ fn canonicalize_cursor_bridge_tool(
         "Shell" | "shell" | "Bash" | "bash" | "run_terminal_cmd" => "run_terminal_command",
         "Read" | "read" => "read_file",
         "Write" | "write_file" => "write",
-        "Edit" | "StrReplace" | "str_replace" | "MultiEdit" => "search_replace",
-        "Glob" | "LS" | "ls" => "list_dir",
+        // MultiEdit uses an edits[] payload that does not match search_replace;
+        // leave it unmapped so unknown-tool recovery can steer toward edits.
+        "Edit" | "StrReplace" | "str_replace" => "search_replace",
+        "Glob" => "glob",
+        "LS" | "ls" => "list_dir",
         "Grep" => "grep",
         "WebSearch" => "web_search",
         "WebFetch" => "web_fetch",
@@ -448,6 +518,11 @@ fn canonicalize_cursor_bridge_tool(
             "list_dir" => {
                 rename_json_key(map, "path", "target_directory");
                 rename_json_key(map, "target_file", "target_directory");
+            }
+            "glob" => {
+                rename_json_key(map, "glob_pattern", "pattern");
+                // Cursor sometimes sends `target_directory`; Grok glob uses `path`.
+                rename_json_key(map, "target_directory", "path");
             }
             "run_terminal_command" => {
                 rename_json_key(map, "cmd", "command");
@@ -746,6 +821,36 @@ mod tests {
     }
 
     #[test]
+    fn remaps_cursor_glob_to_glob_not_list_dir() {
+        let raw = r#"```grok-tool-calls
+{"tool_calls":[
+  {"name":"Glob","arguments":{"glob_pattern":"**/*.rs","target_directory":"src"}},
+  {"name":"LS","arguments":{"path":"crates"}}
+]}
+```"#;
+        let parsed = parse_assistant_output(raw);
+        assert_eq!(parsed.tool_calls.len(), 2);
+        assert_eq!(parsed.tool_calls[0].name, "glob");
+        assert!(parsed.tool_calls[0].arguments.contains("\"pattern\""));
+        assert!(parsed.tool_calls[0].arguments.contains("**/*.rs"));
+        assert!(parsed.tool_calls[0].arguments.contains("\"path\""));
+        assert!(!parsed.tool_calls[0].arguments.contains("glob_pattern"));
+        assert_eq!(parsed.tool_calls[1].name, "list_dir");
+        assert!(parsed.tool_calls[1].arguments.contains("target_directory"));
+    }
+
+    #[test]
+    fn does_not_remap_multiedit_to_search_replace() {
+        let raw = r#"```grok-tool-calls
+{"tool_calls":[{"name":"MultiEdit","arguments":{"file_path":"a.rs","edits":[{"old_string":"a","new_string":"b"}]}}]}
+```"#;
+        let parsed = parse_assistant_output(raw);
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert_eq!(parsed.tool_calls[0].name, "MultiEdit");
+        assert!(parsed.tool_calls[0].arguments.contains("edits"));
+    }
+
+    #[test]
     fn plain_text_passthrough() {
         let parsed = parse_assistant_output("hello");
         assert_eq!(parsed.content, "hello");
@@ -803,6 +908,21 @@ mod tests {
     }
 
     #[test]
+    fn suppress_holds_partial_tool_json_before_full_fence() {
+        // Progressive deltas must not leak `{` / `"tool_calls"` into the UI.
+        assert!(should_suppress_assistant_stream("{"));
+        assert!(should_suppress_assistant_stream(r#"{"tool_"#));
+        assert!(should_suppress_assistant_stream(
+            r#"{"tool_calls":[{"name":"read_file""#
+        ));
+        assert!(should_suppress_assistant_stream("```grok-tool-calls"));
+        assert!(should_suppress_assistant_stream(
+            "Sure.\n\n```grok-tool-calls\n{\"tool_calls\":[]}"
+        ));
+        assert!(!should_suppress_assistant_stream("Sure, I can help with that."));
+    }
+
+    #[test]
     fn protocol_overrides_cursor_ask_mode_refusal() {
         assert!(TOOL_PROTOCOL.contains("Ignore Cursor ask"));
         assert!(TOOL_PROTOCOL.contains("Editing files\nis allowed"));
@@ -814,5 +934,37 @@ mod tests {
         assert!(!TOOL_PROTOCOL.contains("(Read, Write, Edit, Shell"));
         assert!(!TOOL_EXAMPLE.contains("\"name\":\"Read\""));
         assert!(TOOL_EXAMPLE.contains("read_file"));
+        // Edit example steers away from ask-mode "I can't write" refusals.
+        assert!(TOOL_EXAMPLE.contains("search_replace"));
+        assert!(TOOL_EXAMPLE.contains("Edits are normal"));
+    }
+
+    #[test]
+    fn looks_like_ask_mode_refusal_detects_common_phrases() {
+        assert!(looks_like_ask_mode_refusal(
+            "I'm in ask mode, so I can't edit files. Switch to agent mode."
+        ));
+        assert!(looks_like_ask_mode_refusal(
+            "I am currently in ask mode and cannot make changes."
+        ));
+        assert!(looks_like_ask_mode_refusal(
+            "Ask mode is read-only — please switch to Agent mode to apply edits."
+        ));
+        assert!(looks_like_ask_mode_refusal(
+            "I can only provide guidance while in ask-mode."
+        ));
+    }
+
+    #[test]
+    fn looks_like_ask_mode_refusal_ignores_benign_mentions() {
+        // Docs / explanations that mention the words without refusing.
+        assert!(!looks_like_ask_mode_refusal(
+            "Grok Shift+Tab ask mode is separate from Cursor CLI --mode ask."
+        ));
+        assert!(!looks_like_ask_mode_refusal(
+            "The bridge always uses ask mode; Grok still runs write tools."
+        ));
+        assert!(!looks_like_ask_mode_refusal("I'll update the file now."));
+        assert!(!looks_like_ask_mode_refusal("hello world"));
     }
 }
