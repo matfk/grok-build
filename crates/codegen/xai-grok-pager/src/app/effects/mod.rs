@@ -3433,6 +3433,35 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::FetchCursorUsage { agent_id } => {
+            tasks.spawn(async move {
+                let result = tokio::task::spawn_blocking(
+                    xai_grok_shell::agent::cursor_cli::fetch_cursor_account,
+                )
+                .await;
+                match result {
+                    Ok(Ok(info)) => TaskResult::CursorUsageComplete {
+                        agent_id,
+                        info: Box::new(info),
+                    },
+                    Ok(Err(error)) => {
+                        let silent = error.contains("not found")
+                            || error.contains("NotFound")
+                            || error.contains("Cursor Agent CLI not found");
+                        TaskResult::CursorUsageFailed {
+                            agent_id,
+                            silent,
+                            error,
+                        }
+                    }
+                    Err(e) => TaskResult::CursorUsageFailed {
+                        agent_id,
+                        silent: false,
+                        error: format!("task join error: {e}"),
+                    },
+                }
+            });
+        }
         Effect::SendFeedback { agent_id, session_id, feedback_text } => {
             use xai_grok_shell::session::ClientType;
             use xai_grok_shell::session::acp_types::ClientFeedbackInput;
