@@ -187,8 +187,8 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
     }]
 }
 
-/// `/usage` — session token/cost, then consumer credits when visible.
-/// Credits are chained after the session block so layout stays ordered.
+/// `/usage` — session token/cost, then Cursor account, then SuperGrok credits.
+/// Blocks are chained so scrollback layout stays ordered.
 pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -210,12 +210,12 @@ pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
                     "Session usage is unavailable until the session starts.".to_string(),
                 ));
             }
-            append_consumer_billing_surface(app, id)
+            append_cursor_usage_surface(id)
         }
     }
 }
 
-/// Commit a session-usage block if still on `session_id`, then consumer credits.
+/// Commit a session-usage block if still on `session_id`, then Cursor + credits.
 pub(super) fn commit_session_usage_block(
     app: &mut AppView,
     agent_id: AgentId,
@@ -229,6 +229,25 @@ pub(super) fn commit_session_usage_block(
         return vec![];
     }
     agent.scrollback.push_block(RenderBlock::system(text));
+    append_cursor_usage_surface(agent_id)
+}
+
+/// Next `/usage` step after the session ledger: Cursor account, then SuperGrok.
+pub(super) fn append_cursor_usage_surface(agent_id: AgentId) -> Vec<Effect> {
+    vec![Effect::FetchCursorUsage { agent_id }]
+}
+
+/// Commit the Cursor account block (or a failure note), then consumer credits.
+pub(super) fn commit_cursor_usage_block(
+    app: &mut AppView,
+    agent_id: AgentId,
+    text: Option<String>,
+) -> Vec<Effect> {
+    if let Some(text) = text
+        && let Some(agent) = app.agents.get_mut(&agent_id)
+    {
+        agent.scrollback.push_block(RenderBlock::system(text));
+    }
     append_consumer_billing_surface(app, agent_id)
 }
 
