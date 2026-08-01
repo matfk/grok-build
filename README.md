@@ -79,3 +79,20 @@ grok
 ```
 
 In the TUI, run `/model` and pick a your desired cursor model.
+
+## Staying up to date
+
+This fork may show a tip when a newer Grok Build release exists:
+
+`Update: upstream vX available — git pull & rebuild (ctrl+u dismisses)`
+
+That tip is **notice-only**. Do **not** run the stock updater (`grok update`). It installs the official binary and would drop Cursor support. `ctrl+u` on the tip only dismisses it.
+
+Upstream is already merged into this fork when available. To update:
+
+```sh
+cd /path/to/grok-build
+git pull
+cargo build -p xai-grok-pager-bin --release
+cp target/release/xai-grok-pager ~/.local/bin/grok
+```
