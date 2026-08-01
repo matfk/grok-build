@@ -3731,7 +3731,9 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 return InputOutcome::Action(Action::FetchSessionList);
             }
             if ctx.has_pending_update && key!('u', CONTROL).matches(key) {
-                return InputOutcome::Action(Action::QuitForUpdate);
+                // Cursor fork: do not run the official updater (it would wipe
+                // fork binaries). Ctrl+U only dismisses the notice tip.
+                return InputOutcome::Action(Action::DismissPendingUpdate);
             }
             if ctx.has_foreign_resume && key!('u', CONTROL).matches(key) {
                 return InputOutcome::Action(Action::ResumeForeignSession);
@@ -7690,7 +7692,7 @@ pub(crate) mod tests {
         app.pending_update_version = Some("9.9.9".into());
         assert!(matches!(
             app.handle_input(&key),
-            InputOutcome::Action(Action::QuitForUpdate)
+            InputOutcome::Action(Action::DismissPendingUpdate)
         ));
     }
     #[test]
