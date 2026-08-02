@@ -74,7 +74,7 @@ To send provider-specific authentication or version headers -- for example, Anth
 
 Grok can use models from your **Cursor** subscription by routing prompts through the [Cursor Agent CLI](https://cursor.com/docs/cli/overview). Grok still runs its own tools (edit, shell, search); Cursor is only the model backend.
 
-Inference always uses `agent --print --mode ask --output-format stream-json`. Ask mode keeps Cursor from running its own tools against your tree — it does **not** make Grok read-only. Grok still edits via its tool loop (`grok-tool-calls`). Shift+Tab session modes (Agent / Plan / Ask) stay Grok-local — they do not change Cursor CLI mode. Within a user turn, follow-up tool rounds resume the same Cursor CLI session via `--resume` when available.
+Inference always uses `agent --print --mode ask --output-format stream-json`. Ask mode keeps Cursor from running its own tools against your tree — it does **not** make Grok read-only. Grok still edits via its tool loop (`grok-tool-calls`). Ask mode may still *emit* native `tool_call` stream events or `Shell:`/`Read:`-shaped text; Grok translates those into its own tools when possible instead of failing the turn. Shift+Tab session modes (Agent / Plan / Ask) stay Grok-local — they do not change Cursor CLI mode. Within a user turn, follow-up tool rounds resume the same Cursor CLI session via `--resume` when available.
 
 ### Prerequisites
 
