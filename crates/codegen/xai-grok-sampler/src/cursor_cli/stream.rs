@@ -9,7 +9,7 @@ use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use xai_grok_sampling_types::{ConversationRequest, TokenUsage};
+use xai_grok_sampling_types::{ConversationRequest, TokenUsage, ToolCall};
 
 use crate::events::{SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
 use crate::metrics::InferenceLatencyStats;
@@ -20,7 +20,7 @@ use super::process::{
 };
 use super::prompt::{
     build_prompt, build_response, looks_like_tool_intent, parse_assistant_output,
-    should_suppress_assistant_stream, tool_calls_required,
+    should_suppress_assistant_stream, tool_call_from_cursor_ndjson, tool_calls_required,
 };
 
 /// Options for one Cursor CLI sampling turn.
@@ -100,6 +100,10 @@ pub fn stream_cursor_cli(
         let mut fatal: Option<CursorCliError> = None;
         let mut cursor_session_id: Option<String> = None;
         let mut native_tool_warned = false;
+        // Tools recovered from NDJSON `tool_call` events (keyed by call_id).
+        let mut native_tools: std::collections::HashMap<String, ToolCall> =
+            std::collections::HashMap::new();
+        let mut native_tools_anon: Vec<ToolCall> = Vec::new();
 
         loop {
             let next = tokio::select! {
@@ -178,13 +182,29 @@ pub fn stream_cursor_cli(
                                 chunk_index: idx,
                             };
                         }
-                        CursorNdjsonEvent::NativeToolCall => {
+                        CursorNdjsonEvent::NativeToolCall {
+                            subtype,
+                            call_id,
+                            raw,
+                        } => {
                             if !native_tool_warned {
                                 native_tool_warned = true;
                                 warn!(
+                                    subtype = %subtype,
+                                    call_id = ?call_id,
                                     "Cursor CLI emitted a native tool_call in ask mode; \
-                                     ignoring (Grok owns tools)"
+                                     translating when possible (Grok owns tools)"
                                 );
+                            }
+                            if let Some(tc) = tool_call_from_cursor_ndjson(&raw) {
+                                if let Some(id) = call_id.filter(|s| !s.is_empty()) {
+                                    native_tools.insert(id, tc);
+                                } else if !tc.id.is_empty() {
+                                    let id = tc.id.to_string();
+                                    native_tools.insert(id, tc);
+                                } else {
+                                    native_tools_anon.push(tc);
+                                }
                             }
                         }
                         CursorNdjsonEvent::Result {
@@ -302,42 +322,32 @@ pub fn stream_cursor_cli(
         }
 
         let parsed = parse_assistant_output(&assistant_text);
-        // Only retry unparseable tool-shaped output (or ignored native NDJSON
-        // tool_calls). Do NOT fail/retry on ask-mode refusal prose — that
-        // surfaced as "Retry failed: … ask-mode refusal" under Cursor billing
-        // and often false-positived on normal answers. Prompt steering handles
-        // refusals.
-        if parsed.tool_calls.is_empty()
+        let mut extra_tool_calls: Vec<ToolCall> = native_tools.into_values().collect();
+        extra_tool_calls.append(&mut native_tools_anon);
+        // Prefer text-parsed tools; NDJSON extras fill in when the model only
+        // emitted native tool_call events (or unparseable text UI).
+        let has_tools = !parsed.tool_calls.is_empty() || !extra_tool_calls.is_empty();
+        if !has_tools
             && tools_offered
             && (tools_required
                 || looks_like_tool_intent(&assistant_text)
                 || native_tool_warned)
         {
-            yield SamplingEvent::Failed {
-                request_id: request_id.clone(),
-                error: SamplingErrorInfo {
-                    kind: SamplingErrorKind::EmptyResponse,
-                    status_code: None,
-                    message: "Cursor CLI emitted a tool-call-shaped response that \
-                     could not be parsed; retrying"
-                        .into(),
-                    is_retryable: true,
-                    retry_after_secs: None,
-                    model_metadata: None,
-                    empty_response_context: None,
-                    doom_loop_triggers: None,
-                    doom_loop_aborted_at_chunk: None,
-                    credential: xai_grok_sampling_types::SentCredential::Unknown,
-                },
-            };
-            return;
+            // Soft-complete: protocol mismatch must not become a retry storm.
+            warn!(
+                tools_required,
+                native_tool_warned,
+                intent = looks_like_tool_intent(&assistant_text),
+                "Cursor CLI tool-shaped output could not be translated; \
+                 soft-completing without tools"
+            );
         }
 
         // When tools were offered we never streamed text chunks (buffered for
         // final parse). Force 0 so shell `fallback_text` can emit clean prose
         // without replaying any tool JSON that never reached the UI.
         // Tool-only turns keep message_chunks at 0 as well.
-        let message_chunks = if tools_offered || !parsed.tool_calls.is_empty() {
+        let message_chunks = if tools_offered || has_tools {
             0
         } else {
             message_chunks
@@ -359,6 +369,7 @@ pub fn stream_cursor_cli(
             usage,
             message_chunks,
             cursor_session_id,
+            extra_tool_calls,
         );
         yield SamplingEvent::Completed {
             request_id: request_id.clone(),

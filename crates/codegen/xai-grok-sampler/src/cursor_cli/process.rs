@@ -338,7 +338,15 @@ pub enum CursorNdjsonEvent {
     },
     SessionId(String),
     /// Cursor-native tool call (should not appear in ask mode).
-    NativeToolCall,
+    ///
+    /// Ask mode still *emits* these; Grok translates recoverable payloads.
+    /// `subtype: started` often has only `call_id` — later subtypes may carry
+    /// name/args. Keep the full JSON so the stream can merge by `call_id`.
+    NativeToolCall {
+        subtype: String,
+        call_id: Option<String>,
+        raw: serde_json::Value,
+    },
     Other,
 }
 
@@ -388,7 +396,28 @@ pub fn parse_ndjson_line(line: &str) -> Option<CursorNdjsonEvent> {
                 Some(CursorNdjsonEvent::AssistantText(text))
             }
         }
-        "tool_call" => Some(CursorNdjsonEvent::NativeToolCall),
+        "tool_call" => {
+            let subtype = value
+                .get("subtype")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let call_id = value
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .or_else(|| {
+                    value
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                });
+            Some(CursorNdjsonEvent::NativeToolCall {
+                subtype,
+                call_id,
+                raw: value,
+            })
+        }
         "result" => {
             let is_error = value
                 .get("is_error")
@@ -520,10 +549,35 @@ claude-opus-5-high - Opus 5 1M
     }
 
     #[test]
-    fn parses_native_tool_call_as_ignored() {
+    fn parses_native_tool_call_preserves_payload() {
         let line = r#"{"type":"tool_call","subtype":"started","call_id":"x"}"#;
         match parse_ndjson_line(line) {
-            Some(CursorNdjsonEvent::NativeToolCall) => {}
+            Some(CursorNdjsonEvent::NativeToolCall {
+                subtype,
+                call_id,
+                raw,
+            }) => {
+                assert_eq!(subtype, "started");
+                assert_eq!(call_id.as_deref(), Some("x"));
+                assert_eq!(raw.get("type").and_then(|v| v.as_str()), Some("tool_call"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_native_tool_call_with_tool_fields() {
+        let line = r#"{"type":"tool_call","subtype":"completed","call_id":"c1","name":"Shell","arguments":{"command":"git status"}}"#;
+        match parse_ndjson_line(line) {
+            Some(CursorNdjsonEvent::NativeToolCall {
+                subtype,
+                call_id,
+                raw,
+            }) => {
+                assert_eq!(subtype, "completed");
+                assert_eq!(call_id.as_deref(), Some("c1"));
+                assert_eq!(raw.get("name").and_then(|v| v.as_str()), Some("Shell"));
+            }
             other => panic!("unexpected {other:?}"),
         }
     }

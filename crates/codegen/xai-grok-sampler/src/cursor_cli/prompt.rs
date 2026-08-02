@@ -318,56 +318,189 @@ fn looks_like_cursor_native_tool_ui(t: &str) -> bool {
 /// Promote Cursor-native `Shell:` / `Read:` (etc.) lines into Grok tool calls.
 ///
 /// Returns `None` when no recoverable tool lines are present. Prose lines are
-/// kept as `content`; tool lines are removed from content.
+/// kept as `content`; tool lines are removed from content. Multi-line
+/// Write/Edit/TodoWrite bodies are consumed until the next tool head.
 fn extract_cursor_native_tool_ui(raw: &str) -> Option<ParsedAssistantOutput> {
+    const TOOL_HEADS: &[&str] = &[
+        "Shell", "Bash", "Read", "Write", "Edit", "StrReplace", "Glob", "Grep", "LS",
+        "TodoWrite",
+    ];
+
+    let lines: Vec<&str> = raw.lines().collect();
     let mut tool_calls = Vec::new();
-    let mut content_lines = Vec::new();
-    for line in raw.lines() {
+    let mut content_lines: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < lines.len() {
+        let line = lines[i];
         let trimmed = line.trim_start();
         let Some((head, rest)) = trimmed.split_once(':') else {
-            content_lines.push(line);
+            content_lines.push(line.to_owned());
+            i += 1;
             continue;
         };
         let head = head.trim();
         let rest = rest.trim();
-        if rest.is_empty() {
-            content_lines.push(line);
+        if !TOOL_HEADS.iter().any(|h| *h == head) {
+            content_lines.push(line.to_owned());
+            i += 1;
             continue;
         }
-        // Only promote one-line tools with enough args. Write/Edit/TodoWrite
-        // need multi-line payloads — leave those for retry via tool intent.
-        let (name, arguments) = match head {
-            "Shell" | "Bash" => (
-                "run_terminal_command".to_owned(),
-                serde_json::json!({ "command": rest, "description": rest }),
-            ),
-            "Read" => (
-                "read_file".to_owned(),
-                serde_json::json!({ "target_file": rest }),
-            ),
-            "Glob" => ("glob".to_owned(), serde_json::json!({ "pattern": rest })),
-            "Grep" => ("grep".to_owned(), serde_json::json!({ "pattern": rest })),
-            "LS" => (
-                "list_dir".to_owned(),
-                serde_json::json!({ "target_directory": rest }),
-            ),
-            _ => {
-                content_lines.push(line);
-                continue;
+
+        let mut body_lines: Vec<&str> = Vec::new();
+        let mut j = i + 1;
+        while j < lines.len() {
+            let next = lines[j];
+            let next_trim = next.trim_start();
+            let is_next_tool = next_trim
+                .split_once(':')
+                .map(|(h, _)| TOOL_HEADS.iter().any(|t| *t == h.trim()))
+                .unwrap_or(false);
+            if is_next_tool {
+                break;
             }
+            body_lines.push(next);
+            j += 1;
+        }
+        let body = body_lines.join("\n");
+        let body_trim = body.trim();
+
+        let mapped = match head {
+            "Shell" | "Bash" => {
+                let command = if rest.is_empty() {
+                    body_trim.to_owned()
+                } else if body_trim.is_empty() {
+                    rest.to_owned()
+                } else {
+                    format!("{rest}\n{body_trim}")
+                };
+                if command.is_empty() {
+                    None
+                } else {
+                    Some((
+                        "run_terminal_command".to_owned(),
+                        serde_json::json!({ "command": command, "description": command }),
+                    ))
+                }
+            }
+            "Read" => {
+                let path = if !rest.is_empty() { rest } else { body_trim };
+                if path.is_empty() {
+                    None
+                } else {
+                    Some((
+                        "read_file".to_owned(),
+                        serde_json::json!({ "target_file": path }),
+                    ))
+                }
+            }
+            "Glob" => {
+                let pattern = if !rest.is_empty() { rest } else { body_trim };
+                if pattern.is_empty() {
+                    None
+                } else {
+                    Some(("glob".to_owned(), serde_json::json!({ "pattern": pattern })))
+                }
+            }
+            "Grep" => {
+                let pattern = if !rest.is_empty() { rest } else { body_trim };
+                if pattern.is_empty() {
+                    None
+                } else {
+                    Some(("grep".to_owned(), serde_json::json!({ "pattern": pattern })))
+                }
+            }
+            "LS" => {
+                let dir = if !rest.is_empty() { rest } else { body_trim };
+                if dir.is_empty() {
+                    None
+                } else {
+                    Some((
+                        "list_dir".to_owned(),
+                        serde_json::json!({ "target_directory": dir }),
+                    ))
+                }
+            }
+            "Write" => {
+                if rest.is_empty() || body_trim.is_empty() {
+                    None
+                } else {
+                    Some((
+                        "write".to_owned(),
+                        serde_json::json!({ "file_path": rest, "content": body_trim }),
+                    ))
+                }
+            }
+            "Edit" | "StrReplace" => {
+                if !body_trim.is_empty()
+                    && let Ok(val) = serde_json::from_str::<serde_json::Value>(body_trim)
+                {
+                    let mut map = match val {
+                        serde_json::Value::Object(m) => m,
+                        other => {
+                            let mut m = serde_json::Map::new();
+                            m.insert("value".into(), other);
+                            m
+                        }
+                    };
+                    if !rest.is_empty()
+                        && !map.contains_key("file_path")
+                        && !map.contains_key("path")
+                    {
+                        map.insert(
+                            "file_path".into(),
+                            serde_json::Value::String(rest.to_owned()),
+                        );
+                    }
+                    Some(("search_replace".to_owned(), serde_json::Value::Object(map)))
+                } else if !rest.is_empty() && !body_trim.is_empty() {
+                    Some((
+                        "search_replace".to_owned(),
+                        serde_json::json!({
+                            "file_path": rest,
+                            "old_string": "",
+                            "new_string": body_trim,
+                        }),
+                    ))
+                } else {
+                    None
+                }
+            }
+            "TodoWrite" => {
+                let json_src = if !rest.is_empty() && rest.starts_with('{') {
+                    rest
+                } else {
+                    body_trim
+                };
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_src) {
+                    Some(("todo_write".to_owned(), val))
+                } else {
+                    None
+                }
+            }
+            _ => None,
         };
-        let (name, arguments) = canonicalize_cursor_bridge_tool(name, arguments);
-        let arguments = match arguments {
-            serde_json::Value::String(s) => Arc::<str>::from(s),
-            other => Arc::<str>::from(other.to_string()),
-        };
-        let id = format!("cursor_cli_call_{}", tool_calls.len());
-        tool_calls.push(ToolCall {
-            id: Arc::<str>::from(id),
-            name,
-            arguments,
-        });
+
+        if let Some((name, arguments)) = mapped {
+            let (name, arguments) = canonicalize_cursor_bridge_tool(name, arguments);
+            let arguments = match arguments {
+                serde_json::Value::String(s) => Arc::<str>::from(s),
+                other => Arc::<str>::from(other.to_string()),
+            };
+            let id = format!("cursor_cli_call_{}", tool_calls.len());
+            tool_calls.push(ToolCall {
+                id: Arc::<str>::from(id),
+                name,
+                arguments,
+            });
+            i = j;
+            continue;
+        }
+
+        // Unrecoverable tool-looking line: keep as prose (do not Failed-retry).
+        content_lines.push(line.to_owned());
+        i += 1;
     }
+
     if tool_calls.is_empty() {
         return None;
     }
@@ -643,7 +776,7 @@ fn wire_to_tool_calls(calls: Vec<WireToolCall>) -> Vec<ToolCall> {
 /// Available tools list uses `run_terminal_command` / `read_file` / `target_file`.
 /// Without this remap, those calls fail as unknown tools and look like shell
 /// rejections under Cursor billing.
-fn canonicalize_cursor_bridge_tool(
+pub(crate) fn canonicalize_cursor_bridge_tool(
     name: String,
     mut arguments: serde_json::Value,
 ) -> (String, serde_json::Value) {
@@ -715,6 +848,61 @@ fn rename_json_key(
     if let Some(v) = map.remove(from) {
         map.insert(to.to_owned(), v);
     }
+}
+
+/// Translate a Cursor CLI `type: tool_call` NDJSON object into a Grok [`ToolCall`].
+///
+/// Returns `None` when the event has no recoverable tool name (e.g. bare
+/// `subtype: started` with only `call_id`). Field layout varies by CLI version;
+/// probe common Cursor / Anthropic-shaped paths.
+pub(crate) fn tool_call_from_cursor_ndjson(value: &serde_json::Value) -> Option<ToolCall> {
+    let call_id = value
+        .get("call_id")
+        .or_else(|| value.get("id"))
+        .or_else(|| value.get("toolCallId"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+
+    let tool_obj = value
+        .get("tool_call")
+        .or_else(|| value.get("toolCall"))
+        .or_else(|| value.get("function"))
+        .or_else(|| value.get("tool"))
+        .filter(|v| v.is_object())
+        .unwrap_or(value);
+
+    let name = tool_obj
+        .get("name")
+        .or_else(|| tool_obj.get("toolName"))
+        .or_else(|| tool_obj.get("tool_name"))
+        .or_else(|| value.get("name"))
+        .or_else(|| value.get("toolName"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?
+        .to_owned();
+
+    let arguments = tool_obj
+        .get("arguments")
+        .or_else(|| tool_obj.get("input"))
+        .or_else(|| tool_obj.get("params"))
+        .or_else(|| tool_obj.get("args"))
+        .or_else(|| value.get("arguments"))
+        .or_else(|| value.get("input"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let (name, arguments) = canonicalize_cursor_bridge_tool(name, arguments);
+    let arguments = match arguments {
+        serde_json::Value::String(s) => Arc::<str>::from(s),
+        other => Arc::<str>::from(other.to_string()),
+    };
+    let id = call_id.unwrap_or_else(|| "cursor_cli_native".to_owned());
+    Some(ToolCall {
+        id: Arc::<str>::from(id),
+        name,
+        arguments,
+    })
 }
 
 fn parse_tool_calls_json(body: &str) -> Option<Vec<ToolCall>> {
@@ -906,14 +1094,22 @@ pub fn tool_calls_required(request: &ConversationRequest) -> bool {
 }
 
 /// Build a [`ConversationResponse`] from streamed assistant text + optional usage.
+///
+/// `extra_tool_calls` carries tools recovered from Cursor NDJSON `tool_call`
+/// events (ask mode still emits them). Prefer tools parsed from `raw_text`;
+/// use extras only when the text parse found none so fence/UI remains primary.
 pub fn build_response(
     raw_text: &str,
     model: &str,
     usage: Option<TokenUsage>,
     message_chunks_emitted: u64,
     cursor_session_id: Option<String>,
+    extra_tool_calls: Vec<ToolCall>,
 ) -> ConversationResponse {
     let mut parsed = parse_assistant_output(raw_text);
+    if parsed.tool_calls.is_empty() && !extra_tool_calls.is_empty() {
+        parsed.tool_calls = extra_tool_calls;
+    }
     if !parsed.tool_calls.is_empty() {
         // Drop residual fence/JSON so shell fallback_text cannot paint it.
         parsed.content = strip_tool_payload_from_content(&parsed.content);
@@ -1108,6 +1304,60 @@ mod tests {
     }
 
     #[test]
+    fn parses_cursor_native_write_multiline() {
+        let raw = "Updating.\nWrite: src/a.rs\nfn main() {}\n\nRead: README.md\n";
+        let parsed = parse_assistant_output(raw);
+        assert!(parsed.tool_calls.len() >= 2, "{parsed:?}");
+        assert_eq!(parsed.tool_calls[0].name, "write");
+        assert!(parsed.tool_calls[0].arguments.contains("src/a.rs"));
+        assert!(parsed.tool_calls[0].arguments.contains("fn main"));
+        assert_eq!(parsed.tool_calls[1].name, "read_file");
+        assert!(parsed.content.contains("Updating"));
+        assert!(!parsed.content.contains("Write:"));
+    }
+
+    #[test]
+    fn tool_call_from_cursor_ndjson_maps_shell() {
+        let raw = serde_json::json!({
+            "type": "tool_call",
+            "subtype": "completed",
+            "call_id": "c1",
+            "name": "Shell",
+            "arguments": {"command": "git status"}
+        });
+        let tc = tool_call_from_cursor_ndjson(&raw).expect("mapped");
+        assert_eq!(tc.name, "run_terminal_command");
+        assert!(tc.arguments.contains("git status"));
+        assert_eq!(&*tc.id, "c1");
+    }
+
+    #[test]
+    fn tool_call_from_cursor_ndjson_started_without_name_is_none() {
+        let raw = serde_json::json!({
+            "type": "tool_call",
+            "subtype": "started",
+            "call_id": "x"
+        });
+        assert!(tool_call_from_cursor_ndjson(&raw).is_none());
+    }
+
+    #[test]
+    fn build_response_merges_extra_tool_calls_when_text_has_none() {
+        let extras = vec![ToolCall {
+            id: Arc::from("extra_1"),
+            name: "read_file".into(),
+            arguments: Arc::from(r#"{"target_file":"Cargo.toml"}"#),
+        }];
+        let resp = build_response("Just prose.", "auto", None, 0, None, extras);
+        let ConversationItem::Assistant(a) = &resp.items[0] else {
+            panic!("expected assistant");
+        };
+        assert_eq!(a.tool_calls.len(), 1);
+        assert_eq!(a.tool_calls[0].name, "read_file");
+        assert!(matches!(resp.stop_reason, Some(StopReason::ToolCalls)));
+    }
+
+    #[test]
     fn suppress_holds_partial_tool_json_before_full_fence() {
         // Progressive deltas must not leak `{` / `"tool_calls"` into the UI.
         assert!(should_suppress_assistant_stream("{"));
@@ -1205,7 +1455,7 @@ mod tests {
             "precondition: residual JSON must remain in parse content"
         );
 
-        let response = build_response(raw, "cursor/auto", None, 0, None);
+        let response = build_response(raw, "cursor/auto", None, 0, None, Vec::new());
         assert_eq!(response.tool_calls().len(), 1);
         assert_eq!(response.assistant_text(), "I'll check.");
         assert_eq!(response.fallback_text().as_deref(), Some("I'll check."));
@@ -1214,7 +1464,7 @@ mod tests {
     #[test]
     fn build_response_fence_only_has_empty_fallback() {
         let raw = "```grok-tool-calls\n{\"tool_calls\":[{\"name\":\"read_file\",\"arguments\":{\"target_file\":\"README.md\"}}]}\n```";
-        let response = build_response(raw, "cursor/auto", None, 0, None);
+        let response = build_response(raw, "cursor/auto", None, 0, None, Vec::new());
         assert_eq!(response.tool_calls().len(), 1);
         assert!(response.assistant_text().is_empty());
         assert!(response.fallback_text().is_none());
