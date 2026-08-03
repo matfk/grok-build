@@ -1391,6 +1391,9 @@ async fn test_responses_backend_hits_responses_endpoint_not_chat_completions() {
         ApiBackend::Messages => {
             panic!("Expected Responses backend but got Messages");
         }
+        ApiBackend::CursorCli => {
+            panic!("Expected Responses backend but got CursorCli");
+        }
     }
 
     assert!(
@@ -1428,6 +1431,9 @@ async fn test_chat_completions_backend_hits_chat_endpoint_not_responses() {
         }
         ApiBackend::Messages => {
             panic!("Expected ChatCompletions backend but got Messages");
+        }
+        ApiBackend::CursorCli => {
+            panic!("Expected ChatCompletions backend but got CursorCli");
         }
     }
 

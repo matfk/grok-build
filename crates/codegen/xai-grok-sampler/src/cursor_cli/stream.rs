@@ -311,6 +311,8 @@ pub fn stream_cursor_cli(
                     // Auth / misconfig must not spin the retry loop forever.
                     is_retryable: !auth,
                     retry_after_secs: None,
+                    // No HTTP `x-should-retry` header on the CLI bridge.
+                    should_retry: None,
                     model_metadata: None,
                     empty_response_context: None,
                     doom_loop_triggers: None,
@@ -437,6 +439,8 @@ fn failed_event(request_id: &RequestId, err: CursorCliError) -> SamplingEvent {
             message: err.to_string(),
             is_retryable,
             retry_after_secs: None,
+            // No HTTP `x-should-retry` header on the CLI bridge.
+            should_retry: None,
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
