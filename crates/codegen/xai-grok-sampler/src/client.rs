@@ -890,6 +890,13 @@ impl SamplingClient {
             request.top_p = self.defaults.top_p;
         }
 
+        // DeepSeek expects `thinking.type` + remapped reasoning_effort.
+        // Only mutate when talking to DeepSeek so other OpenAI-compat hosts
+        // do not see an unknown `thinking` field.
+        if xai_grok_sampling_types::is_deepseek_api_url(&self.base_url) {
+            xai_grok_sampling_types::apply_deepseek_thinking_params(&mut request);
+        }
+
         Ok(request)
     }
 
@@ -2225,6 +2232,7 @@ mod tests {
             search_parameters: None,
             response_format: None,
             reasoning_effort: None,
+            thinking: None,
             x_grok_conv_id: None,
             x_grok_req_id: None,
             x_grok_session_id: None,

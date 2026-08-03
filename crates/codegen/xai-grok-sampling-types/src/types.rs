@@ -60,6 +60,83 @@ where
     Option::<T>::deserialize(deserializer).map(|opt| opt.unwrap_or_default())
 }
 
+/// DeepSeek chat-completions thinking toggle (`thinking: { "type": "…" }`).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct DeepSeekThinking {
+    #[serde(rename = "type")]
+    pub type_: DeepSeekThinkingType,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DeepSeekThinkingType {
+    Enabled,
+    Disabled,
+}
+
+impl DeepSeekThinking {
+    pub fn enabled() -> Self {
+        Self {
+            type_: DeepSeekThinkingType::Enabled,
+        }
+    }
+
+    pub fn disabled() -> Self {
+        Self {
+            type_: DeepSeekThinkingType::Disabled,
+        }
+    }
+}
+
+/// True when `base_url` targets DeepSeek's OpenAI-compatible API.
+pub fn is_deepseek_api_url(base_url: &str) -> bool {
+    let lower = base_url.to_ascii_lowercase();
+    // Strip scheme for a cheap host check without pulling URL parsers into this crate.
+    let host = lower
+        .split("://")
+        .nth(1)
+        .unwrap_or(lower.as_str())
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    host == "api.deepseek.com" || host.ends_with(".deepseek.com")
+}
+
+/// Map Grok `/effort` onto DeepSeek's OpenAI-compat wire shape.
+///
+/// DeepSeek's documented `reasoning_effort` set is `low` / `high` / `max`
+/// (api-docs.deepseek.com, "Thinking Mode" — `medium` is not accepted) and the
+/// model internally maps requested `xhigh` → `high`, `max` → `max`.
+///
+/// - `none` / `minimal` → thinking disabled (no `reasoning_effort`)
+/// - `low` / `max` → thinking enabled + that effort (documented values)
+/// - `medium` / `high` / `xhigh` → thinking enabled + `high`
+pub fn apply_deepseek_thinking_params(req: &mut ChatCompletionRequest) {
+    match req.reasoning_effort {
+        Some(ReasoningEffort::None) | Some(ReasoningEffort::Minimal) => {
+            req.thinking = Some(DeepSeekThinking::disabled());
+            req.reasoning_effort = None;
+        }
+        Some(effort) => {
+            req.thinking = Some(DeepSeekThinking::enabled());
+            req.reasoning_effort = Some(match effort {
+                ReasoningEffort::Low => ReasoningEffort::Low,
+                ReasoningEffort::Max => ReasoningEffort::Max,
+                ReasoningEffort::High
+                | ReasoningEffort::Medium
+                | ReasoningEffort::Xhigh => ReasoningEffort::High,
+                ReasoningEffort::None | ReasoningEffort::Minimal => unreachable!(),
+            });
+        }
+        None => {
+            // Leave thinking unset — DeepSeek defaults to thinking on / high.
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,6 +164,10 @@ pub struct ChatCompletionRequest {
     pub response_format: Option<crate::rs::ResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// DeepSeek OpenAI-compat thinking toggle (`thinking.type` = enabled/disabled).
+    /// Omitted for non-DeepSeek hosts so unknown-field APIs are not broken.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<DeepSeekThinking>,
 
     /// custom headers
     #[serde(skip)]
@@ -127,6 +208,7 @@ impl ChatCompletionRequest {
             search_parameters: None,
             response_format: None,
             reasoning_effort: None,
+            thinking: None,
             x_grok_conv_id: None,
             x_grok_req_id: None,
             x_grok_session_id: None,
@@ -153,6 +235,7 @@ impl ChatCompletionRequest {
             search_parameters: None,
             response_format: None,
             reasoning_effort: None,
+            thinking: None,
             x_grok_conv_id: None,
             x_grok_req_id: None,
             x_grok_session_id: None,
@@ -1537,5 +1620,94 @@ mod tests {
         let inner: &dyn TraceContext = &*cloned_trace;
         let downcast = inner.as_any().downcast_ref::<TestTrace>().unwrap();
         assert_eq!(downcast.0, "trace-data");
+    }
+
+    #[test]
+    fn is_deepseek_api_url_matches_host() {
+        assert!(is_deepseek_api_url("https://api.deepseek.com"));
+        assert!(is_deepseek_api_url("https://api.deepseek.com/v1"));
+        assert!(is_deepseek_api_url("https://api.deepseek.com:443/chat"));
+        assert!(is_deepseek_api_url("https://beta.deepseek.com"));
+        assert!(!is_deepseek_api_url("https://openrouter.ai/api/v1"));
+        assert!(!is_deepseek_api_url("https://api.x.ai/v1"));
+        assert!(!is_deepseek_api_url("https://notdeepseek.com"));
+    }
+
+    #[test]
+    fn apply_deepseek_thinking_none_disables_and_clears_effort() {
+        let mut req = ChatCompletionRequest::new("deepseek-chat", vec![]);
+        req.reasoning_effort = Some(ReasoningEffort::None);
+        apply_deepseek_thinking_params(&mut req);
+        assert_eq!(req.thinking, Some(DeepSeekThinking::disabled()));
+        assert!(req.reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn apply_deepseek_thinking_minimal_same_as_none() {
+        let mut req = ChatCompletionRequest::new("deepseek-chat", vec![]);
+        req.reasoning_effort = Some(ReasoningEffort::Minimal);
+        apply_deepseek_thinking_params(&mut req);
+        assert_eq!(req.thinking, Some(DeepSeekThinking::disabled()));
+        assert!(req.reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn apply_deepseek_thinking_low_high_max_enable() {
+        for (input, expected) in [
+            (ReasoningEffort::Low, ReasoningEffort::Low),
+            (ReasoningEffort::High, ReasoningEffort::High),
+            (ReasoningEffort::Max, ReasoningEffort::Max),
+        ] {
+            let mut req = ChatCompletionRequest::new("deepseek-chat", vec![]);
+            req.reasoning_effort = Some(input);
+            apply_deepseek_thinking_params(&mut req);
+            assert_eq!(req.thinking, Some(DeepSeekThinking::enabled()), "{input:?}");
+            assert_eq!(req.reasoning_effort, Some(expected), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn deepseek_reasoning_effort_wire_values_match_documented_set() {
+        // Regression: `max` must serialize to the documented DeepSeek wire
+        // value (api-docs.deepseek.com "Thinking Mode" accepts low/high/max,
+        // mapping requested xhigh→high and max→max) — not an alias of `high`.
+        for (input, expected) in [
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::High, "high"),
+            (ReasoningEffort::Max, "max"),
+        ] {
+            let mut req = ChatCompletionRequest::new("deepseek-chat", vec![]);
+            req.reasoning_effort = Some(input);
+            apply_deepseek_thinking_params(&mut req);
+            let wire = serde_json::to_value(req.reasoning_effort).unwrap();
+            assert_eq!(wire, json!(expected), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn apply_deepseek_thinking_medium_xhigh_map_to_high() {
+        for input in [ReasoningEffort::Medium, ReasoningEffort::Xhigh] {
+            let mut req = ChatCompletionRequest::new("deepseek-chat", vec![]);
+            req.reasoning_effort = Some(input);
+            apply_deepseek_thinking_params(&mut req);
+            assert_eq!(req.thinking, Some(DeepSeekThinking::enabled()), "{input:?}");
+            assert_eq!(req.reasoning_effort, Some(ReasoningEffort::High), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn apply_deepseek_thinking_unset_leaves_defaults() {
+        let mut req = ChatCompletionRequest::new("deepseek-chat", vec![]);
+        apply_deepseek_thinking_params(&mut req);
+        assert!(req.thinking.is_none());
+        assert!(req.reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn deepseek_thinking_serde_uses_type_field() {
+        let enabled = serde_json::to_value(DeepSeekThinking::enabled()).unwrap();
+        assert_eq!(enabled, json!({ "type": "enabled" }));
+        let disabled = serde_json::to_value(DeepSeekThinking::disabled()).unwrap();
+        assert_eq!(disabled, json!({ "type": "disabled" }));
     }
 }
