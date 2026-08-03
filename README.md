@@ -78,7 +78,7 @@ After you rebuild later, run the `cp` line again so `~/.local/bin/grok` is updat
 grok
 ```
 
-In the TUI, run `/model` and pick a your desired cursor model.
+In the TUI, run `/model` and pick a Cursor model (or a DeepSeek / OpenRouter model if you set `DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY`).
 
 ## Staying up to date
 
