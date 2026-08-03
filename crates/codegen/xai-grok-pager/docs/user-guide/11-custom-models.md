@@ -158,6 +158,75 @@ context_window = 200000
 
 ---
 
+## DeepSeek / OpenRouter (env BYOK)
+
+When `DEEPSEEK_API_KEY` and/or `OPENROUTER_API_KEY` are set, Grok auto-injects those providers’ models into the catalog. They appear in `grok models`, `/model`, and `Ctrl+M` with no `[model.*]` config required.
+
+### Setup
+
+```bash
+export DEEPSEEK_API_KEY="sk-..."
+export OPENROUTER_API_KEY="sk-or-..."   # optional; independent of DeepSeek
+grok
+```
+
+Then pick a model:
+
+```
+/model deepseek/deepseek-v4-flash
+/model openrouter/openai/gpt-4o
+```
+
+Catalog keys use a provider prefix; the API body still gets the raw provider id (`deepseek-v4-flash`, `openai/gpt-4o`, …).
+
+| Provider | Env key | Catalog prefix | Base URL |
+| -------- | ------- | -------------- | -------- |
+| DeepSeek | `DEEPSEEK_API_KEY` | `deepseek/` | `https://api.deepseek.com` |
+| OpenRouter | `OPENROUTER_API_KEY` | `openrouter/` | `https://openrouter.ai/api/v1` |
+
+Both use the OpenAI chat-completions backend. Each injected entry sets `env_key` to that provider’s variable so session / `XAI_API_KEY` credentials are never sent to the third-party host.
+
+### DeepSeek `/effort` (thinking)
+
+Injected DeepSeek models expose `/effort` with **none / low / high / max** (default **high**):
+
+- `none` — send `thinking: { "type": "disabled" }` (no `reasoning_effort`)
+- `low` / `high` / `max` — thinking enabled plus that DeepSeek `reasoning_effort`
+
+OpenRouter injections do not claim `/effort` support.
+
+### Curated vs full list
+
+**DeepSeek:** a short curated list (`deepseek-v4-flash`, `deepseek-v4-pro`) is always injected; Grok also fetches DeepSeek `GET /models` and merges any additional ids. DeepSeek's list omits `context_length`, so Grok fills context windows from OpenRouter's public model catalog when reachable (otherwise a 128K fallback).
+
+**OpenRouter:** a small coding-oriented curated shortlist is injected by default (the full OpenRouter catalog is hundreds of models). To expand to every model from `GET /models`:
+
+```bash
+export GROK_OPENROUTER_FETCH_ALL=1
+```
+
+or in `~/.grok/config.toml`:
+
+```toml
+[features]
+openrouter_fetch_all = true
+```
+
+### Enable / disable
+
+Precedence matches other discovery features: **env override → `[features]` → auto (key present)**.
+
+| Knob | Effect |
+| ---- | ------ |
+| `GROK_DEEPSEEK=1\|0` | Force DeepSeek injection on/off |
+| `GROK_OPENROUTER=1\|0` | Force OpenRouter injection on/off |
+| `[features].deepseek` | Same as above when env unset |
+| `[features].openrouter` | Same as above when env unset |
+
+Manual `[model.deepseek/…]` / `[model.openrouter/…]` entries still win: discovery uses `or_insert` and will not overwrite your config.
+
+---
+
 ## Configuring Custom Models
 
 Add custom model endpoints in `~/.grok/config.toml` under `[model.<name>]` sections:
