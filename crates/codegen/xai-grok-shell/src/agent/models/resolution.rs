@@ -205,6 +205,14 @@ pub(crate) fn resolve_model_catalog(
         crate::agent::cursor_cli::merge_cursor_models(&mut catalog);
     }
 
+    if crate::agent::byok_providers::deepseek_enabled(cfg) {
+        crate::agent::byok_providers::merge_deepseek_models(&mut catalog);
+    }
+    if crate::agent::byok_providers::openrouter_enabled(cfg) {
+        let fetch_all = crate::agent::byok_providers::openrouter_fetch_all(cfg);
+        crate::agent::byok_providers::merge_openrouter_models(&mut catalog, fetch_all);
+    }
+
     if let Ok(Some(disabled)) = ModelGlobSet::compile(cfg.models.disabled_models.as_ref()) {
         let before = catalog.len();
         catalog.retain(|key, entry| !disabled.matches(key, &entry.model));
