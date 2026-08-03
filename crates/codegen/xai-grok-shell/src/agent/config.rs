@@ -4946,7 +4946,8 @@ pub(crate) fn try_resolve_model_credentials(
     let cfg = Config::new_from_toml_cfg(&raw)
         .map_err(|e| tracing::warn!(error = %e, "config parse failed for credential resolution"))
         .ok()?;
-    let models = resolve_model_list(&cfg, None);
+    // Same catalog as auth-fact lookup: include env-injected BYOK providers.
+    let models = crate::agent::models::resolve_model_catalog(&cfg, None);
     let entry = find_model_by_id(&models, model_id)?;
     let mut credentials = resolve_credentials(entry, session_key);
     enforce_disable_api_key_auth(
@@ -5024,7 +5025,11 @@ fn with_resolved_model<T>(model_id: &str, f: impl FnOnce(ModelLookup) -> T) -> T
     else {
         return f(ModelLookup::ConfigUnavailable);
     };
-    let models = resolve_model_list(&cfg, None);
+    // Use the full catalog (includes env-injected DeepSeek/OpenRouter/Cursor
+    // models). `resolve_model_list` alone misses those entries, so BYOK status
+    // flipped to NotByok and reconstruct_full_config attached the session JWT
+    // to third-party hosts → 401 loops.
+    let models = crate::agent::models::resolve_model_catalog(&cfg, None);
     f(ModelLookup::Loaded(find_model_by_id(&models, model_id)))
 }
 /// Resolve a standalone `SamplerConfig` for an auxiliary model slug (image
