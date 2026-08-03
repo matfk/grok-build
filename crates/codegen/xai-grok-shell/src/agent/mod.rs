@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod app;
 pub mod auth_method;
+pub mod byok_providers;
 pub mod chat_modes;
 pub mod config;
 pub mod config_model_override_parse;

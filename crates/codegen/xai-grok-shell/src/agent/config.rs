@@ -4796,6 +4796,23 @@ pub struct Features {
     /// `None` = auto (enable when the `agent` binary is available).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_cli: Option<bool>,
+    /// Discover DeepSeek models when `DEEPSEEK_API_KEY` is set.
+    /// Catalog keys use the `deepseek/<id>` prefix.
+    /// `None` = auto (enable when `DEEPSEEK_API_KEY` is non-empty).
+    /// Override with `GROK_DEEPSEEK=1|0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deepseek: Option<bool>,
+    /// Discover OpenRouter models when `OPENROUTER_API_KEY` is set.
+    /// Catalog keys use the `openrouter/<id>` prefix.
+    /// `None` = auto (enable when `OPENROUTER_API_KEY` is non-empty).
+    /// Override with `GROK_OPENROUTER=1|0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openrouter: Option<bool>,
+    /// When OpenRouter is enabled, also fetch the full `/models` list
+    /// (hundreds of entries). Default curated shortlist only.
+    /// `None` = false. Override with `GROK_OPENROUTER_FETCH_ALL=1|0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openrouter_fetch_all: Option<bool>,
 }
 /// Resolved credentials for a model session.
 pub(crate) struct ResolvedCredentials {
